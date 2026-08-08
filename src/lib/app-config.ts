@@ -8,6 +8,7 @@ export const APP_ENV = {
 	googleDriveClientSecret: "GOOGLE_DRIVE_CLIENT_SECRET",
 	googleDriveRefreshToken: "GOOGLE_DRIVE_REFRESH_TOKEN",
 	googleDriveBrowserApiKey: "GOOGLE_DRIVE_BROWSER_API_KEY",
+	integrationReadToken: "INTEGRATION_READ_TOKEN",
 	timing: "HARBUR_TIMING",
 } as const
 

@@ -145,10 +145,7 @@ export function RepositoryPage({
 	}
 
 	useEffect(() => {
-		if (
-			!manifest ||
-			(repositoryReady && selectedPullRequestFilesLoaded)
-		) {
+		if (!manifest || (repositoryReady && selectedPullRequestFilesLoaded)) {
 			return
 		}
 		if (loadingRepositoryId === manifest.id) return

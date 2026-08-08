@@ -355,6 +355,45 @@ async function loadGoogleDriveFileMedia(
 	return { file, raw }
 }
 
+export async function downloadGoogleDriveFile(
+	accessToken: string,
+	fileId: string,
+	maxBytes = 256 * 1024 * 1024,
+) {
+	const response = await driveFetchWithRetry(
+		`${GOOGLE_DRIVE_API.filesUrl}/${encodeURIComponent(fileId)}?alt=media`,
+		{
+			headers: { Authorization: `Bearer ${accessToken}` },
+		},
+	)
+	await ensureDriveResponse(response)
+	const declaredBytes = Number(response.headers.get("content-length") ?? 0)
+	if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+		throw new Error("Google Drive file exceeds the download size limit.")
+	}
+	if (!response.body) return new Uint8Array()
+	const reader = response.body.getReader()
+	const chunks: Uint8Array[] = []
+	let totalBytes = 0
+	while (true) {
+		const { done, value } = await reader.read()
+		if (done) break
+		totalBytes += value.byteLength
+		if (totalBytes > maxBytes) {
+			await reader.cancel()
+			throw new Error("Google Drive file exceeds the download size limit.")
+		}
+		chunks.push(value)
+	}
+	const bytes = new Uint8Array(totalBytes)
+	let offset = 0
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset)
+		offset += chunk.byteLength
+	}
+	return bytes
+}
+
 export async function saveGoogleDriveFileByName({
 	accessToken,
 	parentId,

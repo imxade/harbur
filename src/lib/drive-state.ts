@@ -20,6 +20,7 @@ import {
 	deleteGoogleDrivePermission,
 	deleteGoogleDriveAppDataDocument,
 	ensureGoogleDriveResultsFolder,
+	downloadGoogleDriveFile,
 	getGoogleDriveFileMetadata,
 	getGoogleDriveStorageQuota,
 	googleDrivePublicFileMediaUrl,
@@ -82,6 +83,25 @@ type AppPullRequest = PullRequestRecord & {
 	comments: ThreadComment[]
 }
 
+export type RepositorySnapshot = {
+	revision: string
+	sha256: string
+	archiveBytes: number
+	driveFileId: string
+	createdAt: string
+	source: "repository.created" | "repository.synced" | "pull_request.merged"
+	pullRequestNumber?: number
+}
+
+export type IntegrationEvent = {
+	cursor: number
+	id: string
+	type: "repository.snapshot"
+	repositoryId: string
+	revision: string
+	createdAt: string
+}
+
 export type AppState = {
 	schema: typeof APP_SCHEMA.state
 	storageVersion?: string
@@ -99,6 +119,9 @@ export type AppState = {
 	repositoryFiles: Record<string, RepositoryFile[]>
 	repositoryReadmeFiles: Record<string, RepositoryFile[]>
 	repositoryZipFileIds: Record<string, string>
+	repositorySnapshots: Record<string, RepositorySnapshot[]>
+	integrationEvents: IntegrationEvent[]
+	integrationNextCursor: number
 	issues: Record<string, IssueRecord[]>
 	pullRequests: Record<string, AppPullRequest[]>
 	pullRequestZipFileIds: Record<string, string>
@@ -271,16 +294,7 @@ export async function loadOrCreateAppState(
 		}
 		if (parsed?.schema === APP_SCHEMA.state) {
 			const parsedSettings = appSettingsSchema.safeParse(parsed.settings)
-			if (
-				parsed.rootFolder?.id &&
-				parsed.config &&
-				parsedSettings.success &&
-				parsed.repositories &&
-				parsed.watches &&
-				parsed.users &&
-				parsed.notifications &&
-				parsed.backupCredentials
-			) {
+			if (parsed.rootFolder?.id && parsed.config && parsedSettings.success) {
 				const rootFolder = parsed.rootFolder
 				const state: AppState = {
 					schema: APP_SCHEMA.state,
@@ -292,18 +306,21 @@ export async function loadOrCreateAppState(
 					},
 					settings: parsedSettings.data,
 					rootFolder,
-					repositories: parsed.repositories,
+					repositories: parsed.repositories ?? [],
 					repositoryFiles: {},
 					repositoryReadmeFiles: {},
 					repositoryZipFileIds: {},
+					repositorySnapshots: parsed.repositorySnapshots ?? {},
+					integrationEvents: parsed.integrationEvents ?? [],
+					integrationNextCursor: parsed.integrationNextCursor ?? 1,
 					issues: {},
 					pullRequests: {},
 					pullRequestZipFileIds: {},
-					watches: parsed.watches,
-					users: parsed.users,
-					notifications: parsed.notifications,
+					watches: parsed.watches ?? {},
+					users: parsed.users ?? {},
+					notifications: parsed.notifications ?? {},
 					activity: parsed.activity ?? [],
-					backupCredentials: parsed.backupCredentials,
+					backupCredentials: parsed.backupCredentials ?? {},
 					repositoryStorageVersions: {},
 					loadedRepositoryIds: [],
 					loadedRepositoryFileIds: [],
@@ -353,6 +370,9 @@ export async function loadOrCreateAppState(
 		repositoryFiles: {},
 		repositoryReadmeFiles: {},
 		repositoryZipFileIds: {},
+		repositorySnapshots: {},
+		integrationEvents: [],
+		integrationNextCursor: 1,
 		issues: {},
 		pullRequests: {},
 		pullRequestZipFileIds: {},
@@ -439,6 +459,9 @@ async function saveAppState(accessToken: string, state: AppState) {
 							settings: state.settings,
 							rootFolder: state.rootFolder,
 							repositories: state.repositories,
+							repositorySnapshots: state.repositorySnapshots,
+							integrationEvents: state.integrationEvents,
+							integrationNextCursor: state.integrationNextCursor,
 							watches: state.watches,
 							users: state.users,
 							notifications: state.notifications,
@@ -2586,6 +2609,93 @@ export async function completePullRequestArchiveUpload({
 	}
 }
 
+async function snapshotForRepositoryZip({
+	accessToken,
+	zipFileId,
+	source,
+	pullRequestNumber,
+}: {
+	accessToken: string
+	zipFileId: string
+	source: RepositorySnapshot["source"]
+	pullRequestNumber?: number
+}): Promise<RepositorySnapshot> {
+	const bytes = await downloadGoogleDriveFile(accessToken, zipFileId)
+	const digest = await crypto.subtle.digest("SHA-256", bytes)
+	const sha256 = Array.from(new Uint8Array(digest), (byte) =>
+		byte.toString(16).padStart(2, "0"),
+	).join("")
+	return {
+		revision: sha256,
+		sha256,
+		archiveBytes: bytes.byteLength,
+		driveFileId: zipFileId,
+		createdAt: new Date().toISOString(),
+		source,
+		pullRequestNumber,
+	}
+}
+
+type IntegrationStateFields = Pick<
+	AppState,
+	"repositorySnapshots" | "integrationEvents" | "integrationNextCursor"
+>
+
+export function appendRepositorySnapshot<T extends IntegrationStateFields>(
+	state: T,
+	repositoryId: string,
+	snapshot: RepositorySnapshot,
+): Omit<T, keyof IntegrationStateFields> & IntegrationStateFields {
+	const cursor = state.integrationNextCursor
+	return {
+		...state,
+		repositorySnapshots: {
+			...state.repositorySnapshots,
+			[repositoryId]: [
+				...(state.repositorySnapshots[repositoryId] ?? []),
+				snapshot,
+			],
+		},
+		integrationEvents: [
+			...state.integrationEvents,
+			{
+				cursor,
+				id: `${repositoryId}:${snapshot.revision}:${cursor}`,
+				type: "repository.snapshot",
+				repositoryId,
+				revision: snapshot.revision,
+				createdAt: snapshot.createdAt,
+			},
+		],
+		integrationNextCursor: cursor + 1,
+	}
+}
+
+export async function ensureIntegrationSnapshots(
+	accessToken: string,
+	state: AppState,
+) {
+	let nextState = state
+	for (const repository of state.repositories) {
+		if (
+			repository.archived ||
+			nextState.repositorySnapshots[repository.id]?.length
+		) {
+			continue
+		}
+		const zipFileId = nextState.repositoryZipFileIds[repository.id]
+		if (!zipFileId) continue
+		const snapshot = await snapshotForRepositoryZip({
+			accessToken,
+			zipFileId,
+			source: "repository.created",
+		})
+		nextState = appendRepositorySnapshot(nextState, repository.id, snapshot)
+	}
+	if (nextState !== state) await saveAppState(accessToken, nextState)
+	return nextState
+}
+
 async function createRepositoryWithPreparedFiles({
 	accessToken,
 	state,
@@ -2654,7 +2764,12 @@ async function createRepositoryWithPreparedFiles({
 			}),
 		})
 
-		const nextState: AppState = {
+		const snapshot = await snapshotForRepositoryZip({
+			accessToken,
+			zipFileId: zipFile.id,
+			source: "repository.created",
+		})
+		const repositoryState: AppState = {
 			...state,
 			repositories: [...state.repositories, manifest],
 			repositoryFiles: {
@@ -2683,6 +2798,11 @@ async function createRepositoryWithPreparedFiles({
 				},
 			],
 		}
+		const nextState = appendRepositorySnapshot(
+			repositoryState,
+			manifest.id,
+			snapshot,
+		)
 		const savedState = await saveRepositoryState(
 			accessToken,
 			nextState,
@@ -3035,6 +3155,11 @@ export async function updateUserNameInDriveState({
 			remapId,
 		),
 		repositoryZipFileIds: remapRecordKeys(state.repositoryZipFileIds, remapId),
+		repositorySnapshots: remapRecordKeys(state.repositorySnapshots, remapId),
+		integrationEvents: state.integrationEvents.map((event) => ({
+			...event,
+			repositoryId: remapId(event.repositoryId),
+		})),
 		issues: remapRecordKeys(state.issues, remapId),
 		pullRequests: remapRecordKeys(state.pullRequests, remapId),
 		pullRequestZipFileIds: remapRecordKeys(
@@ -3112,6 +3237,10 @@ export async function deleteRepositoryFromDrive({
 		repositoryZipFileIds: omitRecordKey(
 			state.repositoryZipFileIds,
 			repositoryId,
+		),
+		repositorySnapshots: omitRecordKey(state.repositorySnapshots, repositoryId),
+		integrationEvents: state.integrationEvents.filter(
+			(event) => event.repositoryId !== repositoryId,
 		),
 		issues: omitRecordKey(state.issues, repositoryId),
 		pullRequests: omitRecordKey(state.pullRequests, repositoryId),
@@ -4000,6 +4129,8 @@ async function completeRepositoryZipReplacement({
 	files,
 	saveReason,
 	staleMessage,
+	snapshotSource,
+	pullRequestNumber,
 	buildNextState,
 }: {
 	accessToken: string
@@ -4012,6 +4143,8 @@ async function completeRepositoryZipReplacement({
 	files: UploadedRepositoryFileMetadata[]
 	saveReason: string
 	staleMessage: string
+	snapshotSource?: RepositorySnapshot["source"]
+	pullRequestNumber?: number
 	buildNextState: (input: { baseState: AppState; now: string }) => AppState
 }) {
 	const repositoryId = repository.id
@@ -4049,8 +4182,20 @@ async function completeRepositoryZipReplacement({
 			[repositoryId]: zipFile.id,
 		},
 	}
+	const snapshotState = snapshotSource
+		? appendRepositorySnapshot(
+				baseState,
+				repositoryId,
+				await snapshotForRepositoryZip({
+					accessToken,
+					zipFileId: zipFile.id,
+					source: snapshotSource,
+					pullRequestNumber,
+				}),
+			)
+		: baseState
 	const nextState = buildNextState({
-		baseState,
+		baseState: snapshotState,
 		now,
 	})
 	let savedState: AppState
@@ -4068,13 +4213,17 @@ async function completeRepositoryZipReplacement({
 		])
 		throw cause
 	}
+	if (snapshotSource) await saveAppState(accessToken, savedState)
+	else await saveAppState(accessToken, savedState).catch(() => undefined)
 	await Promise.all([
-		oldZipFileId
+		oldZipFileId &&
+		!savedState.repositorySnapshots[repositoryId]?.some(
+			(snapshot) => snapshot.driveFileId === oldZipFileId,
+		)
 			? deleteGoogleDriveFile(accessToken, oldZipFileId).catch(() => undefined)
 			: Promise.resolve(),
 		deleteGoogleDriveFile(accessToken, uploadFolderId).catch(() => undefined),
 	])
-	await saveAppState(accessToken, savedState).catch(() => undefined)
 	return savedState
 }
 
@@ -4119,6 +4268,8 @@ export async function completePullRequestMergeUploadInDriveState({
 		files,
 		saveReason: "pull.merge",
 		staleMessage: "Repository changed before the merge was committed.",
+		snapshotSource: "pull_request.merged",
+		pullRequestNumber,
 		buildNextState: ({ baseState, now }) => ({
 			...baseState,
 			repositories: state.repositories.map((candidate) =>
@@ -4186,6 +4337,7 @@ export async function completeGitHubMirrorSyncUploadInDriveState({
 		files,
 		saveReason: "github.mirror.sync",
 		staleMessage: "Repository changed before the GitHub sync was committed.",
+		snapshotSource: "repository.synced",
 		buildNextState: ({ baseState, now }) => ({
 			...baseState,
 			repositories: state.repositories.map((candidate) =>
@@ -4668,6 +4820,7 @@ async function mirrorStateToBackupDrive({
 	}
 	const rootFolder = await ensureGoogleDriveResultsFolder(backupAccessToken)
 	const repositoryZipFileIds: Record<string, string> = {}
+	const repositorySnapshots: Record<string, RepositorySnapshot[]> = {}
 	const pullRequestZipFileIds: Record<string, string> = {}
 	const repositories: RepositoryManifest[] = []
 
@@ -4702,6 +4855,24 @@ async function mirrorStateToBackupDrive({
 		})
 		repositories.push(backupManifest)
 		repositoryZipFileIds[repository.id] = zipFile.id
+		repositorySnapshots[repository.id] = []
+		for (const snapshot of sourceState.repositorySnapshots[repository.id] ??
+			[]) {
+			const snapshotFile =
+				snapshot.driveFileId === repositoryZipFileId
+					? zipFile
+					: await copyZipArtifactToBackupDrive({
+							ownerAccessToken,
+							backupAccessToken,
+							sourceFileId: snapshot.driveFileId,
+							parentId: repoFolder.id,
+							name: `snapshot-${snapshot.revision}.zip`,
+						})
+			repositorySnapshots[repository.id].push({
+				...snapshot,
+				driveFileId: snapshotFile.id,
+			})
+		}
 
 		for (const pullRequest of sourceState.pullRequests[repository.id] ?? []) {
 			const pullRequestArtifactName = `${APP_STORAGE.pullRequestFolderPrefix}-${pullRequest.number}`
@@ -4730,6 +4901,7 @@ async function mirrorStateToBackupDrive({
 		rootFolder,
 		repositories,
 		repositoryZipFileIds,
+		repositorySnapshots,
 		pullRequestZipFileIds,
 		backupCredentials: {},
 		settings: {

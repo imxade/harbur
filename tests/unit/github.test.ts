@@ -22,7 +22,9 @@ describe("GitHub mirror import", () => {
 						html_url: "https://github.com/imxade/harbur",
 					})
 				}
-				if (url === "https://api.github.com/repos/imxade/harbur/branches/master") {
+				if (
+					url === "https://api.github.com/repos/imxade/harbur/branches/master"
+				) {
 					return jsonResponse({
 						commit: {
 							sha: "commit-sha",
@@ -73,9 +75,7 @@ describe("GitHub mirror import", () => {
 			branch: "master",
 			htmlUrl: "https://github.com/imxade/harbur",
 		})
-		expect(calls.some((url) => url.includes("codeload.github.com"))).toBe(
-			false,
-		)
+		expect(calls.some((url) => url.includes("codeload.github.com"))).toBe(false)
 		expect(calls.some((url) => url.includes("raw.githubusercontent.com"))).toBe(
 			true,
 		)
@@ -94,7 +94,9 @@ describe("GitHub mirror import", () => {
 						html_url: "https://github.com/imxade/harbur",
 					})
 				}
-				if (url === "https://api.github.com/repos/imxade/harbur/branches/main") {
+				if (
+					url === "https://api.github.com/repos/imxade/harbur/branches/main"
+				) {
 					return jsonResponse({
 						commit: {
 							sha: "commit-sha",
@@ -116,7 +118,9 @@ describe("GitHub mirror import", () => {
 				) {
 					return new Response("raw unavailable", { status: 404 })
 				}
-				if (url === "https://api.github.com/repos/imxade/harbur/git/blobs/blob-1") {
+				if (
+					url === "https://api.github.com/repos/imxade/harbur/git/blobs/blob-1"
+				) {
 					return jsonResponse({
 						content: "RmFsbGJhY2sK",
 						encoding: "base64",

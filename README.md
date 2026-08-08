@@ -10,6 +10,19 @@ The Drive-backed design avoids putting large mutable state in one shared file. H
 
 Teams that need their own repository publishing space without managing their own infra can host Harbur on free or low-cost serverless platforms and configure their own owner Drive. This can also be used to avoid a single point of failure with drive backups and GitHub mirrors.
 
+## Deployment integration API
+
+Set `INTEGRATION_READ_TOKEN` to a random value of at least 32 characters to enable private
+repository discovery and the durable merge-event feed under `/api/integrations/v1`. Public
+repository metadata and exact snapshots remain readable without a token. Repository creation,
+GitHub mirror refreshes, and pull-request merges publish immutable ZIP snapshots whose revision is
+the archive SHA-256; archive bytes and digest are re-verified before download.
+
+Consumers should keep the one instance token encrypted, advance the integer event cursor only
+after processing a page, and fetch the exact revision carried by each event. Rotate or revoke
+private and event access by changing or removing `INTEGRATION_READ_TOKEN`. This API never exposes
+Google Drive credentials or file identifiers.
+
 The design keeps hosting simple: the app has no database or persistent server process, repositories are stored as portable ZIP snapshots plus small Drive JSON files with structured collaboration metadata, and optional backup Drives can hold a restorable mirror. Only global control state and Drive credentials stay in Drive app-data; repository manifests, per-user state, repository state, and thread append records live as normal Drive files under the app root or beside each repository. Google Drive credentials and refresh tokens stay server-side or inside Drive app-data, never in browser-readable storage.
 
 ![Harbur app showcase](assets/showcase-grid.png)

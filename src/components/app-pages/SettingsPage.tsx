@@ -514,9 +514,9 @@ export function SettingsPage() {
 										Download cleanup delay ms
 									</span>
 									<span className="mt-1 block text-sm text-base-content/60">
-										Wait this long before deleting temporary ZIP download copies.
-										Use 0 to clean up as soon as the browser starts the media
-										fetch.
+										Wait this long before deleting temporary ZIP download
+										copies. Use 0 to clean up as soon as the browser starts the
+										media fetch.
 									</span>
 								</span>
 								<input
@@ -524,8 +524,7 @@ export function SettingsPage() {
 									type="number"
 									min={0}
 									value={
-										draft.downloadCleanupDelayMs ??
-										APP_DOWNLOAD.cleanupDelayMs
+										draft.downloadCleanupDelayMs ?? APP_DOWNLOAD.cleanupDelayMs
 									}
 									onChange={(event) =>
 										updateDraft({

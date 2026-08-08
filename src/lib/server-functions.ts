@@ -1892,7 +1892,11 @@ export const createRepositoryZipDownloadLinkServer = createServerFn({
 			repositoryId: data.repositoryId,
 			browserApiKey: googleDriveBrowserApiKey(),
 		})
-		return zipDownloadPayload(actor, link, state.settings.downloadCleanupDelayMs)
+		return zipDownloadPayload(
+			actor,
+			link,
+			state.settings.downloadCleanupDelayMs,
+		)
 	})
 
 export const createPullRequestZipDownloadLinkServer = createServerFn({
@@ -1922,7 +1926,11 @@ export const createPullRequestZipDownloadLinkServer = createServerFn({
 			pullRequestNumber: data.pullRequestNumber,
 			browserApiKey: googleDriveBrowserApiKey(),
 		})
-		return zipDownloadPayload(actor, link, state.settings.downloadCleanupDelayMs)
+		return zipDownloadPayload(
+			actor,
+			link,
+			state.settings.downloadCleanupDelayMs,
+		)
 	})
 
 export const revokeZipDownloadLinkServer = createServerFn({ method: "POST" })

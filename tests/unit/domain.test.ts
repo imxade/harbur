@@ -65,7 +65,7 @@ function repo() {
 
 function zipDownloadContext(
 	revokeZipDownload = vi.fn(async () => undefined),
-	cleanupDelayMs = APP_DOWNLOAD.cleanupDelayMs,
+	cleanupDelayMs: number = APP_DOWNLOAD.cleanupDelayMs,
 ): ClientZipWorkflowContext {
 	const unused = async () => {
 		throw new Error("unused")

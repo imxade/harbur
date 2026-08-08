@@ -9,20 +9,24 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as SettingsRouteImport } from './routes/settings'
-import { Route as OwnerRouteImport } from './routes/$owner'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as OwnerRouteImport } from './routes/$owner'
+import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as RepoOwnerRepoRouteImport } from './routes/repo.$owner.$repo'
-import { Route as RepoOwnerRepoSettingsRouteImport } from './routes/repo.$owner.$repo.settings'
-import { Route as RepoOwnerRepoPullsRouteImport } from './routes/repo.$owner.$repo.pulls'
+import { Route as ApiIntegrationsV1CapabilitiesRouteImport } from './routes/api.integrations.v1.capabilities'
+import { Route as ApiIntegrationsV1EventsRouteImport } from './routes/api.integrations.v1.events'
+import { Route as ApiIntegrationsV1RepositoriesRouteImport } from './routes/api.integrations.v1.repositories'
 import { Route as RepoOwnerRepoIssuesRouteImport } from './routes/repo.$owner.$repo.issues'
-import { Route as RepoOwnerRepoPullsNewRouteImport } from './routes/repo.$owner.$repo.pulls.new'
-import { Route as RepoOwnerRepoPullsNumberRouteImport } from './routes/repo.$owner.$repo.pulls.$number'
+import { Route as RepoOwnerRepoPullsRouteImport } from './routes/repo.$owner.$repo.pulls'
+import { Route as RepoOwnerRepoSettingsRouteImport } from './routes/repo.$owner.$repo.settings'
 import { Route as RepoOwnerRepoIssuesNumberRouteImport } from './routes/repo.$owner.$repo.issues.$number'
+import { Route as RepoOwnerRepoPullsNumberRouteImport } from './routes/repo.$owner.$repo.pulls.$number'
+import { Route as RepoOwnerRepoPullsNewRouteImport } from './routes/repo.$owner.$repo.pulls.new'
+import { Route as ApiIntegrationsV1RepositoriesOwnerRepoSnapshotsRevisionRouteImport } from './routes/api.integrations.v1.repositories.$owner.$repo.snapshots.$revision'
 
-const SettingsRoute = SettingsRouteImport.update({
-  id: '/settings',
-  path: '/settings',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OwnerRoute = OwnerRouteImport.update({
@@ -30,9 +34,9 @@ const OwnerRoute = OwnerRouteImport.update({
   path: '/$owner',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const SettingsRoute = SettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RepoOwnerRepoRoute = RepoOwnerRepoRouteImport.update({
@@ -40,9 +44,26 @@ const RepoOwnerRepoRoute = RepoOwnerRepoRouteImport.update({
   path: '/repo/$owner/$repo',
   getParentRoute: () => rootRouteImport,
 } as any)
-const RepoOwnerRepoSettingsRoute = RepoOwnerRepoSettingsRouteImport.update({
-  id: '/settings',
-  path: '/settings',
+const ApiIntegrationsV1CapabilitiesRoute =
+  ApiIntegrationsV1CapabilitiesRouteImport.update({
+    id: '/api/integrations/v1/capabilities',
+    path: '/api/integrations/v1/capabilities',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiIntegrationsV1EventsRoute = ApiIntegrationsV1EventsRouteImport.update({
+  id: '/api/integrations/v1/events',
+  path: '/api/integrations/v1/events',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiIntegrationsV1RepositoriesRoute =
+  ApiIntegrationsV1RepositoriesRouteImport.update({
+    id: '/api/integrations/v1/repositories',
+    path: '/api/integrations/v1/repositories',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const RepoOwnerRepoIssuesRoute = RepoOwnerRepoIssuesRouteImport.update({
+  id: '/issues',
+  path: '/issues',
   getParentRoute: () => RepoOwnerRepoRoute,
 } as any)
 const RepoOwnerRepoPullsRoute = RepoOwnerRepoPullsRouteImport.update({
@@ -50,27 +71,33 @@ const RepoOwnerRepoPullsRoute = RepoOwnerRepoPullsRouteImport.update({
   path: '/pulls',
   getParentRoute: () => RepoOwnerRepoRoute,
 } as any)
-const RepoOwnerRepoIssuesRoute = RepoOwnerRepoIssuesRouteImport.update({
-  id: '/issues',
-  path: '/issues',
+const RepoOwnerRepoSettingsRoute = RepoOwnerRepoSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
   getParentRoute: () => RepoOwnerRepoRoute,
 } as any)
-const RepoOwnerRepoPullsNewRoute = RepoOwnerRepoPullsNewRouteImport.update({
-  id: '/new',
-  path: '/new',
-  getParentRoute: () => RepoOwnerRepoPullsRoute,
-} as any)
+const RepoOwnerRepoIssuesNumberRoute =
+  RepoOwnerRepoIssuesNumberRouteImport.update({
+    id: '/$number',
+    path: '/$number',
+    getParentRoute: () => RepoOwnerRepoIssuesRoute,
+  } as any)
 const RepoOwnerRepoPullsNumberRoute =
   RepoOwnerRepoPullsNumberRouteImport.update({
     id: '/$number',
     path: '/$number',
     getParentRoute: () => RepoOwnerRepoPullsRoute,
   } as any)
-const RepoOwnerRepoIssuesNumberRoute =
-  RepoOwnerRepoIssuesNumberRouteImport.update({
-    id: '/$number',
-    path: '/$number',
-    getParentRoute: () => RepoOwnerRepoIssuesRoute,
+const RepoOwnerRepoPullsNewRoute = RepoOwnerRepoPullsNewRouteImport.update({
+  id: '/new',
+  path: '/new',
+  getParentRoute: () => RepoOwnerRepoPullsRoute,
+} as any)
+const ApiIntegrationsV1RepositoriesOwnerRepoSnapshotsRevisionRoute =
+  ApiIntegrationsV1RepositoriesOwnerRepoSnapshotsRevisionRouteImport.update({
+    id: '/$owner/$repo/snapshots/$revision',
+    path: '/$owner/$repo/snapshots/$revision',
+    getParentRoute: () => ApiIntegrationsV1RepositoriesRoute,
   } as any)
 
 export interface FileRoutesByFullPath {
@@ -78,24 +105,32 @@ export interface FileRoutesByFullPath {
   '/$owner': typeof OwnerRoute
   '/settings': typeof SettingsRoute
   '/repo/$owner/$repo': typeof RepoOwnerRepoRouteWithChildren
+  '/api/integrations/v1/capabilities': typeof ApiIntegrationsV1CapabilitiesRoute
+  '/api/integrations/v1/events': typeof ApiIntegrationsV1EventsRoute
+  '/api/integrations/v1/repositories': typeof ApiIntegrationsV1RepositoriesRouteWithChildren
   '/repo/$owner/$repo/issues': typeof RepoOwnerRepoIssuesRouteWithChildren
   '/repo/$owner/$repo/pulls': typeof RepoOwnerRepoPullsRouteWithChildren
   '/repo/$owner/$repo/settings': typeof RepoOwnerRepoSettingsRoute
   '/repo/$owner/$repo/issues/$number': typeof RepoOwnerRepoIssuesNumberRoute
   '/repo/$owner/$repo/pulls/$number': typeof RepoOwnerRepoPullsNumberRoute
   '/repo/$owner/$repo/pulls/new': typeof RepoOwnerRepoPullsNewRoute
+  '/api/integrations/v1/repositories/$owner/$repo/snapshots/$revision': typeof ApiIntegrationsV1RepositoriesOwnerRepoSnapshotsRevisionRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/$owner': typeof OwnerRoute
   '/settings': typeof SettingsRoute
   '/repo/$owner/$repo': typeof RepoOwnerRepoRouteWithChildren
+  '/api/integrations/v1/capabilities': typeof ApiIntegrationsV1CapabilitiesRoute
+  '/api/integrations/v1/events': typeof ApiIntegrationsV1EventsRoute
+  '/api/integrations/v1/repositories': typeof ApiIntegrationsV1RepositoriesRouteWithChildren
   '/repo/$owner/$repo/issues': typeof RepoOwnerRepoIssuesRouteWithChildren
   '/repo/$owner/$repo/pulls': typeof RepoOwnerRepoPullsRouteWithChildren
   '/repo/$owner/$repo/settings': typeof RepoOwnerRepoSettingsRoute
   '/repo/$owner/$repo/issues/$number': typeof RepoOwnerRepoIssuesNumberRoute
   '/repo/$owner/$repo/pulls/$number': typeof RepoOwnerRepoPullsNumberRoute
   '/repo/$owner/$repo/pulls/new': typeof RepoOwnerRepoPullsNewRoute
+  '/api/integrations/v1/repositories/$owner/$repo/snapshots/$revision': typeof ApiIntegrationsV1RepositoriesOwnerRepoSnapshotsRevisionRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -103,12 +138,16 @@ export interface FileRoutesById {
   '/$owner': typeof OwnerRoute
   '/settings': typeof SettingsRoute
   '/repo/$owner/$repo': typeof RepoOwnerRepoRouteWithChildren
+  '/api/integrations/v1/capabilities': typeof ApiIntegrationsV1CapabilitiesRoute
+  '/api/integrations/v1/events': typeof ApiIntegrationsV1EventsRoute
+  '/api/integrations/v1/repositories': typeof ApiIntegrationsV1RepositoriesRouteWithChildren
   '/repo/$owner/$repo/issues': typeof RepoOwnerRepoIssuesRouteWithChildren
   '/repo/$owner/$repo/pulls': typeof RepoOwnerRepoPullsRouteWithChildren
   '/repo/$owner/$repo/settings': typeof RepoOwnerRepoSettingsRoute
   '/repo/$owner/$repo/issues/$number': typeof RepoOwnerRepoIssuesNumberRoute
   '/repo/$owner/$repo/pulls/$number': typeof RepoOwnerRepoPullsNumberRoute
   '/repo/$owner/$repo/pulls/new': typeof RepoOwnerRepoPullsNewRoute
+  '/api/integrations/v1/repositories/$owner/$repo/snapshots/$revision': typeof ApiIntegrationsV1RepositoriesOwnerRepoSnapshotsRevisionRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -117,36 +156,48 @@ export interface FileRouteTypes {
     | '/$owner'
     | '/settings'
     | '/repo/$owner/$repo'
+    | '/api/integrations/v1/capabilities'
+    | '/api/integrations/v1/events'
+    | '/api/integrations/v1/repositories'
     | '/repo/$owner/$repo/issues'
     | '/repo/$owner/$repo/pulls'
     | '/repo/$owner/$repo/settings'
     | '/repo/$owner/$repo/issues/$number'
     | '/repo/$owner/$repo/pulls/$number'
     | '/repo/$owner/$repo/pulls/new'
+    | '/api/integrations/v1/repositories/$owner/$repo/snapshots/$revision'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/$owner'
     | '/settings'
     | '/repo/$owner/$repo'
+    | '/api/integrations/v1/capabilities'
+    | '/api/integrations/v1/events'
+    | '/api/integrations/v1/repositories'
     | '/repo/$owner/$repo/issues'
     | '/repo/$owner/$repo/pulls'
     | '/repo/$owner/$repo/settings'
     | '/repo/$owner/$repo/issues/$number'
     | '/repo/$owner/$repo/pulls/$number'
     | '/repo/$owner/$repo/pulls/new'
+    | '/api/integrations/v1/repositories/$owner/$repo/snapshots/$revision'
   id:
     | '__root__'
     | '/'
     | '/$owner'
     | '/settings'
     | '/repo/$owner/$repo'
+    | '/api/integrations/v1/capabilities'
+    | '/api/integrations/v1/events'
+    | '/api/integrations/v1/repositories'
     | '/repo/$owner/$repo/issues'
     | '/repo/$owner/$repo/pulls'
     | '/repo/$owner/$repo/settings'
     | '/repo/$owner/$repo/issues/$number'
     | '/repo/$owner/$repo/pulls/$number'
     | '/repo/$owner/$repo/pulls/new'
+    | '/api/integrations/v1/repositories/$owner/$repo/snapshots/$revision'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -154,15 +205,18 @@ export interface RootRouteChildren {
   OwnerRoute: typeof OwnerRoute
   SettingsRoute: typeof SettingsRoute
   RepoOwnerRepoRoute: typeof RepoOwnerRepoRouteWithChildren
+  ApiIntegrationsV1CapabilitiesRoute: typeof ApiIntegrationsV1CapabilitiesRoute
+  ApiIntegrationsV1EventsRoute: typeof ApiIntegrationsV1EventsRoute
+  ApiIntegrationsV1RepositoriesRoute: typeof ApiIntegrationsV1RepositoriesRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/settings': {
-      id: '/settings'
-      path: '/settings'
-      fullPath: '/settings'
-      preLoaderRoute: typeof SettingsRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/$owner': {
@@ -172,11 +226,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OwnerRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/settings': {
+      id: '/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof SettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/repo/$owner/$repo': {
@@ -186,11 +240,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RepoOwnerRepoRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/repo/$owner/$repo/settings': {
-      id: '/repo/$owner/$repo/settings'
-      path: '/settings'
-      fullPath: '/repo/$owner/$repo/settings'
-      preLoaderRoute: typeof RepoOwnerRepoSettingsRouteImport
+    '/api/integrations/v1/capabilities': {
+      id: '/api/integrations/v1/capabilities'
+      path: '/api/integrations/v1/capabilities'
+      fullPath: '/api/integrations/v1/capabilities'
+      preLoaderRoute: typeof ApiIntegrationsV1CapabilitiesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/integrations/v1/events': {
+      id: '/api/integrations/v1/events'
+      path: '/api/integrations/v1/events'
+      fullPath: '/api/integrations/v1/events'
+      preLoaderRoute: typeof ApiIntegrationsV1EventsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/integrations/v1/repositories': {
+      id: '/api/integrations/v1/repositories'
+      path: '/api/integrations/v1/repositories'
+      fullPath: '/api/integrations/v1/repositories'
+      preLoaderRoute: typeof ApiIntegrationsV1RepositoriesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/repo/$owner/$repo/issues': {
+      id: '/repo/$owner/$repo/issues'
+      path: '/issues'
+      fullPath: '/repo/$owner/$repo/issues'
+      preLoaderRoute: typeof RepoOwnerRepoIssuesRouteImport
       parentRoute: typeof RepoOwnerRepoRoute
     }
     '/repo/$owner/$repo/pulls': {
@@ -200,19 +275,19 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RepoOwnerRepoPullsRouteImport
       parentRoute: typeof RepoOwnerRepoRoute
     }
-    '/repo/$owner/$repo/issues': {
-      id: '/repo/$owner/$repo/issues'
-      path: '/issues'
-      fullPath: '/repo/$owner/$repo/issues'
-      preLoaderRoute: typeof RepoOwnerRepoIssuesRouteImport
+    '/repo/$owner/$repo/settings': {
+      id: '/repo/$owner/$repo/settings'
+      path: '/settings'
+      fullPath: '/repo/$owner/$repo/settings'
+      preLoaderRoute: typeof RepoOwnerRepoSettingsRouteImport
       parentRoute: typeof RepoOwnerRepoRoute
     }
-    '/repo/$owner/$repo/pulls/new': {
-      id: '/repo/$owner/$repo/pulls/new'
-      path: '/new'
-      fullPath: '/repo/$owner/$repo/pulls/new'
-      preLoaderRoute: typeof RepoOwnerRepoPullsNewRouteImport
-      parentRoute: typeof RepoOwnerRepoPullsRoute
+    '/repo/$owner/$repo/issues/$number': {
+      id: '/repo/$owner/$repo/issues/$number'
+      path: '/$number'
+      fullPath: '/repo/$owner/$repo/issues/$number'
+      preLoaderRoute: typeof RepoOwnerRepoIssuesNumberRouteImport
+      parentRoute: typeof RepoOwnerRepoIssuesRoute
     }
     '/repo/$owner/$repo/pulls/$number': {
       id: '/repo/$owner/$repo/pulls/$number'
@@ -221,12 +296,19 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RepoOwnerRepoPullsNumberRouteImport
       parentRoute: typeof RepoOwnerRepoPullsRoute
     }
-    '/repo/$owner/$repo/issues/$number': {
-      id: '/repo/$owner/$repo/issues/$number'
-      path: '/$number'
-      fullPath: '/repo/$owner/$repo/issues/$number'
-      preLoaderRoute: typeof RepoOwnerRepoIssuesNumberRouteImport
-      parentRoute: typeof RepoOwnerRepoIssuesRoute
+    '/repo/$owner/$repo/pulls/new': {
+      id: '/repo/$owner/$repo/pulls/new'
+      path: '/new'
+      fullPath: '/repo/$owner/$repo/pulls/new'
+      preLoaderRoute: typeof RepoOwnerRepoPullsNewRouteImport
+      parentRoute: typeof RepoOwnerRepoPullsRoute
+    }
+    '/api/integrations/v1/repositories/$owner/$repo/snapshots/$revision': {
+      id: '/api/integrations/v1/repositories/$owner/$repo/snapshots/$revision'
+      path: '/$owner/$repo/snapshots/$revision'
+      fullPath: '/api/integrations/v1/repositories/$owner/$repo/snapshots/$revision'
+      preLoaderRoute: typeof ApiIntegrationsV1RepositoriesOwnerRepoSnapshotsRevisionRouteImport
+      parentRoute: typeof ApiIntegrationsV1RepositoriesRoute
     }
   }
 }
@@ -271,11 +353,30 @@ const RepoOwnerRepoRouteWithChildren = RepoOwnerRepoRoute._addFileChildren(
   RepoOwnerRepoRouteChildren,
 )
 
+interface ApiIntegrationsV1RepositoriesRouteChildren {
+  ApiIntegrationsV1RepositoriesOwnerRepoSnapshotsRevisionRoute: typeof ApiIntegrationsV1RepositoriesOwnerRepoSnapshotsRevisionRoute
+}
+
+const ApiIntegrationsV1RepositoriesRouteChildren: ApiIntegrationsV1RepositoriesRouteChildren =
+  {
+    ApiIntegrationsV1RepositoriesOwnerRepoSnapshotsRevisionRoute:
+      ApiIntegrationsV1RepositoriesOwnerRepoSnapshotsRevisionRoute,
+  }
+
+const ApiIntegrationsV1RepositoriesRouteWithChildren =
+  ApiIntegrationsV1RepositoriesRoute._addFileChildren(
+    ApiIntegrationsV1RepositoriesRouteChildren,
+  )
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   OwnerRoute: OwnerRoute,
   SettingsRoute: SettingsRoute,
   RepoOwnerRepoRoute: RepoOwnerRepoRouteWithChildren,
+  ApiIntegrationsV1CapabilitiesRoute: ApiIntegrationsV1CapabilitiesRoute,
+  ApiIntegrationsV1EventsRoute: ApiIntegrationsV1EventsRoute,
+  ApiIntegrationsV1RepositoriesRoute:
+    ApiIntegrationsV1RepositoriesRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
