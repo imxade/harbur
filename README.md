@@ -2,11 +2,11 @@
 
 Harbur is a GitHub-style collaboration workspace suitable for non-technical users with simple download and upload workflows, and it runs stateless and stores its durable data in Google Drive. The idea came during the GitHub outage in 2026. The question was: how usable can repository collaboration feel when the app has no database, no long-running backend, and no private infrastructure beyond a serverless deployment and an owner Drive account.
 
-The result is a small project workspace for publishing code snapshots, reading README pages, discussing issues, reviewing pull requests, and managing access from one web UI. It is not meant to replace GitHub or native Git hosting. Instead, it reduces some Git workflow friction for small teams and personal projects by treating repositories as portable ZIP snapshots and routing code changes through pull requests. PR review is current-state based: maintainers inspect the change against the repository as it exists now, test the downloadable merged ZIP if needed, and merge it without a separate Git-style conflict model.
+The result is a small project workspace for publishing code snapshots, reading README pages, discussing issues, reviewing pull requests, and managing access from one web UI. It is not meant to replace GitHub or native Git hosting. Instead, it reduces some Git workflow friction for small teams and personal projects by treating repositories as portable ZIP snapshots and routing code changes through pull requests. Every PR binds an immutable base ZIP to a complete proposal ZIP. The browser computes their diff; a merge is rejected if the repository has changed since the PR was created.
 
-Projects can start from a local folder upload or a public GitHub mirror. Visitors can read README pages and download repository ZIPs without signing in; PR detail pages can build a downloadable merged ZIP for testing before merge. When a PR is merged, Harbur keeps a full pre-merge repository ZIP by copying the previous repository ZIP inside Google Drive, so maintainers can download the exact version from before that merge later. Authenticated contributors can open issues and pull requests, review compact PR diff hunks with line numbers, comment with mentions, watch activity, and merge changes.
+Projects can start from a local folder upload or a public GitHub mirror. Visitors can read README pages and download repository ZIPs without signing in; PR detail pages can download the complete proposal ZIP for testing before merge. When a PR is merged, Harbur keeps the previous repository ZIP as an immutable snapshot and promotes an exact Drive-side copy of the proposal ZIP. Authenticated contributors can open issues and pull requests, review browser-computed diff hunks with line numbers, comment with mentions, watch activity, and merge changes.
 
-The Drive-backed design avoids putting large mutable state in one shared file. High-activity collaboration events such as comments, reviews, issue updates, and PR changes are written as append-style records and later folded into compact indexes and thread documents. This avoids large blocking writes even without request serialization or a database. README sidecars, repository indexes, compact PR change metadata, and optional backup Drive mirrors keep the app usable while still accepting Google Drive's speed and API limits.
+The Drive-backed design avoids putting large mutable state in one shared file. High-activity collaboration events such as comments, reviews, issue updates, and PR changes are written as append-style records and later folded into compact indexes and thread documents. This avoids large blocking writes even without request serialization or a database. README sidecars, artifact references, repository indexes, and optional backup Drive mirrors keep the app usable while still accepting Google Drive's speed and API limits. Diff payloads are never persisted.
 
 Teams that need their own repository publishing space without managing their own infra can host Harbur on free or low-cost serverless platforms and configure their own owner Drive. This can also be used to avoid a single point of failure with drive backups and GitHub mirrors.
 
@@ -53,7 +53,7 @@ The system is best understood at three levels:
 - Mirror a public GitHub repository from the browser.
 - Let anonymous visitors browse public repositories, READMEs, issues, PRs, and ZIPs.
 - Let authenticated users create and discuss issues and PRs.
-- Let maintainers review current-state diffs and merge browser-built ZIPs.
+- Let maintainers review immutable browser-computed diffs and promote exact proposal ZIPs.
 - Keep OAuth secrets and Drive credentials server-side even though archive bytes move directly between browser and Drive.
 - Avoid a database, request serialization service, resident worker, and scheduled daemon.
 - Keep repository artifacts portable and backupable.
@@ -91,14 +91,14 @@ The responsibility split is deliberate:
 
 | Layer | Owns |
 | --- | --- |
-| Browser | React UI, theme, route state, folder selection, `.gitignore` filtering, file reads, FNV-1a content fingerprints, ZIP creation/extraction, PR diff calculation, merged-ZIP synthesis, GitHub public fetches, direct Drive upload PUTs, temporary Drive media fetches, in-memory ZIP caches |
-| TanStack Start server | Session cookies, Google code exchange, identity verification, role refresh, authorization, owner/backup access tokens, HMAC upload/download tickets, quota checks, Drive metadata verification, structured-state commits, append compaction, snapshot SHA-256, filtered state serialization, integration HTTP endpoints |
+| Browser | React UI, theme, route state, folder selection, `.gitignore` filtering, file reads, content fingerprints, bounded ZIP creation/extraction, PR diff calculation, GitHub public fetches, direct Drive upload PUTs, temporary Drive media fetches, in-memory ZIP/diff caches |
+| TanStack Start server | Session cookies, Google code exchange, identity verification, role refresh, authorization, owner/backup access tokens, HMAC upload/download tickets, quota checks, Drive envelope/checksum verification, Drive-side artifact copy, structured-state commits, append compaction, filtered state serialization, integration HTTP redirects |
 | Owner Drive | Canonical global state, repository manifests, indexes, thread documents, append records, current and historical ZIP snapshots, PR ZIPs, staged upload/download folders |
 | Backup Drive | Recreated restorable copy of app state and artifacts, with credentials and backup-target recursion removed |
 
 ### 1.1 Central architectural rule
 
-All ordinary application modules are isomorphic by default because this is TanStack Start. Secret-bearing or Drive-mutating work must stay behind `createServerFn` handlers or server HTTP route handlers. Route components contain no Drive credentials. Large archives are constructed in the browser and sent to a server-created, origin-bound Google resumable-upload URL.
+All ordinary application modules are isomorphic by default because this is TanStack Start. Secret-bearing or Drive-mutating work must stay behind `createServerFn` handlers or server HTTP route handlers. Client ZIP workflows are explicitly client-only. Route components contain no Drive credentials. Archive bytes move only between the browser and Google Drive through server-created, origin-bound transfer URLs; they are never uploaded to or downloaded through the application backend.
 
 ## 2. Technology and dependency choices
 
@@ -327,25 +327,19 @@ type PullRequest = {
   title: string
   body: string
   state: "open" | "closed" | "merged"
+  baseRepositoryZipFileId?: string
+  proposalZipSha256?: string
   reviewedBy?: string
+  reviewedBaseRepositoryZipFileId?: string
+  reviewedProposalZipFileId?: string
   createdAt: string
   updatedAt: string
   editedAt?: string
-  files: RepositoryFile[]          // added/modified files only; hydrated from PR ZIP
-  baseFiles: RepositoryFile[]      // capped sidecars for before-content rendering
-  diff: FileDiff[]
   comments: ThreadComment[]
-}
-
-type FileDiff = {
-  path: string
-  status: "added" | "modified" | "deleted" | "unchanged"
-  beforeHash?: string
-  afterHash?: string
 }
 ```
 
-Persisted PR diffs must not contain `unchanged`. Added/modified entries require matching changed-file metadata; deleted entries must not have upload data. The compact PR ZIP contains only added/modified files. Deletions are represented by diff intent.
+PR state persists only artifact identity/checksum and review metadata. The full proposal ZIP is the proposed repository tree. `FileDiff`, base files, and proposal files exist only in bounded browser memory and are never part of a server-function request or Drive JSON document. Legacy records containing those fields are stripped when loaded and rewritten during compaction; they cannot be merged because they lack immutable base/proposal bindings.
 
 ### 4.9 Activity, notifications, snapshots, and events
 
@@ -409,10 +403,13 @@ Other fixed constants:
 | Upload sweep cap | 10 folders/request |
 | Download cleanup grace | 1 hour after configured delay |
 | Download sweep cap | 10 folders/request |
+| Temporary download-link rate | 30 per actor/address per 10 minutes |
 | Drive quota safety margin | 10 MiB |
 | Append compaction threshold | 5 append records |
 | README sidecars | at most 20 image files and 2 MiB total |
-| PR base sidecars | at most 200 files and 2 MiB total |
+| ZIP extraction ratio | at most 100:1 per file, plus configured file/count/byte limits |
+| Open PRs per actor/repository | 25 |
+| Upload-session rate | 10 per actor per 10 minutes |
 | Drive exact search page | 10 |
 | Drive prefix page | 1000, paginated |
 | Google access-token cache | refresh if less than 60 seconds remains |
@@ -442,7 +439,7 @@ Google Drive My Drive/
       harbur.repository-thread.v1.<rootId>.<uuid>.json
       harbur.repository-append.v1.<rootId>.<appendId>.json
       pull-<uuid>/
-        pull-<uuid>.zip                        compact PR archive
+        pull-<uuid>.zip                        complete proposal archive
       snapshot artifacts retained by file id as needed
 ```
 
@@ -465,7 +462,7 @@ This means global app-data is still a shared versioned document for user profile
 
 ### 6.3 Repository index
 
-The repository-state document contains file metadata without ordinary file content, README/image sidecars, canonical ZIP ID, issue summaries without comments, PR summaries without comments or hydrated changed-file content, PR ZIP ID map, and repository activity.
+The repository-state document contains file metadata without ordinary file content, README/image sidecars, canonical ZIP ID, issue summaries without comments, PR summaries containing artifact references but no diff or file payload, PR ZIP ID map, and repository activity.
 
 ### 6.4 Thread documents and append records
 
@@ -478,7 +475,7 @@ On load, the engine:
 3. folds them idempotently into issue/PR maps, activity, notifications, and PR ZIP IDs;
 4. loads only requested thread documents unless a mutation/backup asks for all;
 5. reapplies appends over hydrated details;
-6. if at least five append files exist, hydrates affected threads, saves full thread documents, saves a new versioned index, then best-effort deletes append files;
+6. if at least five append files exist, hydrates affected threads, saves full thread documents, saves a new versioned index, then best-effort deletes append files; legacy diff-bearing PR documents force this migration immediately;
 7. optionally prunes old PRs.
 
 Malformed append files are ignored. An unreadable/incompatible global, repository, or requested thread document fails closed. Bootstrap occurs only when global app-data is missing.
@@ -491,7 +488,7 @@ Malformed append files are ignored. An unreadable/incompatible global, repositor
 
 ### 7.2 Repository detail load
 
-`getRepositoryDriveState` accepts repository ID, optional root-folder hint, and optional selected issue/PR number. The hint lets repository index/append loading start while global state loads. After global state identifies the canonical manifest, visibility is enforced. Selected thread detail alone is hydrated. A selected PR then causes the browser to fetch and extract its compact ZIP.
+`getRepositoryDriveState` accepts repository ID, optional root-folder hint, and optional selected issue/PR number. The hint lets repository index/append loading start while global state loads. After global state identifies the canonical manifest, visibility is enforced. Selected thread detail alone is hydrated. A selected PR then causes the browser to fetch and safely extract its immutable base and complete proposal ZIPs.
 
 ### 7.3 Browser state merge
 
@@ -501,12 +498,11 @@ The app shell must merge route-scoped state without erasing richer data already 
 - Merge repository file and README maps only for IDs marked as loaded.
 - Merge thread arrays by stable ID and timestamp.
 - Preserve current comments when an incoming summary did not load that thread.
-- Preserve hydrated PR files when incoming state did not load them.
 - Re-sort and renumber threads deterministically.
 - Union loaded markers and repository storage versions.
 - Deduplicate activity by ID; replace each incoming user’s notification list.
 
-In-memory repository and PR ZIP caches are keyed by repository/PR ID and invalidated when the associated Drive ZIP file ID changes.
+In-memory repository, PR base, proposal, and diff caches are keyed by repository/PR ID and invalidated when the associated Drive ZIP file ID changes. Cache contents never enter serialized app state.
 
 ## 8. Authentication and security model
 
@@ -544,7 +540,7 @@ A public repository is visible to everyone. A private repository is visible to a
 
 Upload tickets are `base64url(JSON).base64url(HMAC-SHA256)` signed with the server secret. Payloads bind kind, actor email, staged folder, byte length, origin, expiry, and when applicable repository/root ID, PR number, and base repository ZIP ID. Verification uses timing-safe signature comparison, Zod parsing, expiry, origin, actor, kind, and request-specific identity checks.
 
-Completion independently verifies Drive file name, exact size, parent folder, normalized paths, duplicates, limits, optional sidecar content/hash, PR diff metadata, permissions, policy, and current base ZIP ID.
+Completion independently verifies Drive file name, exact size, parent folder, permissions, policy, and current base ZIP ID. Repository and mirror metadata is path/limit validated. PR completion accepts no diff or file metadata. Merge accepts no archive metadata and promotes only a Drive-side copy of the stored proposal after strict base, checksum, permission, and review-artifact checks.
 
 ### 8.6 Download tickets
 
@@ -620,9 +616,9 @@ Only an author can edit their own body/comment. Title editing is broader: author
 
 The list switches open versus closed, where “closed” includes merged. New PR requires sign-in, enabled PRs, title/body, and a full folder selection. Creation is intentionally detached from the form after submission: the form resets and shows per-draft creating/failed status.
 
-PR detail contains title/thread, review identity, actions, and one collapsible diff card per changed file. Text uses jsdiff `structuredPatch` with three lines of context and old/new line numbers. Invalid UTF-8/binary shows “Binary file changed.” Missing before/after sidecar shows “File content not loaded.”
+PR detail contains title/thread, review identity, actions, and one collapsed diff card per changed file. The browser downloads the immutable base and proposal artifacts, validates bounded ZIP structure and optional Drive SHA-256, computes byte-exact changes locally, and only calculates a text patch when its card is expanded. Text uses jsdiff `structuredPatch` with three lines of context and old/new line numbers. Invalid UTF-8/binary shows “Binary file changed”; oversized text diffs are refused.
 
-“Merged ZIP” exists only for an open PR and builds a local preview without mutation. Review requires merge capability and a reviewer other than the author. Close is server-enforced for author or triage capability, although the current UI enables Close for every signed-in user and relies on the server error. Merge requires capability, open state, enabled PRs, and optional independent review.
+The preview download exists only for an open PR and rebuilds the complete proposal ZIP locally without mutation. Review requires merge capability and a reviewer other than the author; the review record binds both artifact IDs. Close is server-enforced for author or triage capability, although the current UI enables Close for every signed-in user and relies on the server error. Merge requires capability, open state, enabled PRs, an unchanged base repository, and optional independent artifact-bound review.
 
 ### 9.10 Repository settings
 
@@ -641,9 +637,9 @@ Owner Drive can be connected from a dedicated admin screen when credentials are 
 | `GET /api/integrations/v1/capabilities` | None | Version, configured flag, SHA-256 immutable ZIP capability, integer polling cursor |
 | `GET /api/integrations/v1/repositories` | Optional Bearer | Public list without token; public + private with exact valid token |
 | `GET /api/integrations/v1/events?after=0&limit=50` | Required Bearer | Snapshot events, next cursor, hasMore; limit 1–100 |
-| `GET /api/integrations/v1/repositories/$owner/$repo/snapshots/$revision` | Public repo: none; private: Bearer | Exact verified ZIP bytes |
+| `GET /api/integrations/v1/repositories/$owner/$repo/snapshots/$revision` | Public repo: none; private: Bearer | Temporary redirect to an exact Drive-side snapshot copy |
 
-Repository responses do not expose Drive IDs. Snapshot download validates owner (1–100, no slash/backslash/NUL), repository name, and 64-lowercase-hex revision; verifies downloaded size and SHA-256; and returns ZIP with Content-Length, Content-Disposition, ETag, `X-Content-SHA256`, and `Vary: Authorization`. Public snapshots cache for one year immutable; private responses are no-store.
+Repository responses do not expose canonical Drive IDs. Snapshot download validates owner (1–100, no slash/backslash/NUL), repository name, and 64-lowercase-hex revision, creates a temporary Drive-side copy, and returns a 307 redirect with Content-Disposition, ETag, `X-Content-SHA256`, and `Vary: Authorization`. The application backend never reads the ZIP body. Public redirects cache for one year immutable; private responses are no-store.
 
 Errors are JSON. Invalid input is 400, missing/invalid credential 401, missing resource 404, unconfigured storage/admin 503, Drive auth/verification failure 502, and unexpected failure 500 without internal details.
 
@@ -659,12 +655,12 @@ All mutations use POST; reads use GET.
 | `getRepositoryDriveState` | Repository ID/root hint and optional issue/PR number; returns filtered scoped detail |
 | `loginWithGoogle` / `logoutSession` | Exchange popup code/create cookie; clear cookie |
 | `connectOwnerDriveServer` | Admin code exchange; initializes owner state; development `.env.local` persistence |
-| `beginZipUploadServer` | Starts repository, PR, merge, or GitHub sync stage and returns signed ticket + upload URL |
+| `beginZipUploadServer` | Starts repository, PR, or GitHub sync stage and returns signed ticket + upload URL |
 | `cancelZipUploadServer` | Deletes matching actor’s staged folder |
 | `completeRepositoryUploadServer` | Admin verifies repository ticket and commits manifest/index/snapshot |
-| `completePullRequestUploadServer` | Commits compact PR artifact and append record |
+| `completePullRequestUploadServer` | Commits complete proposal artifact reference and append record; accepts no diff/files |
 | `completeGitHubMirrorSyncUploadServer` | Admin replaces mirrored snapshot if base ID still matches |
-| `mergePullRequestServer` | Authorizes and commits browser-built merged repository ZIP |
+| `mergePullRequestServer` | Authorizes an exact Drive-side proposal copy; accepts no ZIP, diff, or file metadata |
 | `watchRepositoryServer` | Updates signed-in actor’s watch set |
 | `markNotificationsReadServer` | Marks all actor mention notifications read |
 | `deleteRepositoryServer` | Admin deletes Drive folder and references |
@@ -675,7 +671,8 @@ All mutations use POST; reads use GET.
 | Issue functions | Create, comment, edit title, edit own message, transition state |
 | PR functions | Comment, edit title, edit own message, review, close, merge |
 | `createRepositoryZipDownloadLinkServer` | Optional actor; visibility check; temporary Drive media copy |
-| `createPullRequestZipDownloadLinkServer` | Optional actor; returns compact PR ZIP temporary copy |
+| `createPullRequestZipDownloadLinkServer` | Optional actor; returns complete proposal ZIP temporary copy |
+| `createPullRequestBaseZipDownloadLinkServer` | Optional actor; returns immutable PR base ZIP temporary copy |
 | `revokeZipDownloadLinkServer` | Validates cleanup ticket, removes permission/file/folder |
 
 Repository writes use a shared three-attempt conflict loop. Each attempt refreshes the Drive token, reloads repository state with only necessary thread detail, rechecks visibility, applies the mutation, and retries only known version conflicts.
@@ -724,32 +721,31 @@ Creation/comments/edits/transitions create UUID append records instead of rewrit
 
 1. Download/extract current repository ZIP, using cache when Drive ZIP ID is unchanged.
 2. Prepare selected proposed folder with the same local filtering and PR limits.
-3. Diff the complete path union. Added has only after hash, deleted only before, modified both, unchanged both.
+3. Diff the complete path union byte-for-byte in the browser.
 4. Remove unchanged entries and reject no-op PR.
-5. Build compact ZIP of added/modified files only.
-6. Select before sidecars only for non-added changed paths, capped at 200/2 MiB.
-7. Begin a `pull-request` stage pinned to current repository ZIP ID; upload directly.
-8. Server verifies stage, base freshness, PR policy, title/body, diff-to-files consistency, and metadata.
-9. Create `pull-<uuid>` folder, move/rename staged ZIP to `pull-<uuid>.zip`, append `pull.created` with PR summary/change metadata and ZIP ID, persist mention additions, and delete empty stage.
+5. Build a complete proposal ZIP containing the entire selected repository tree.
+6. Begin a `pull-request` stage pinned to current repository ZIP ID; upload the ZIP directly from browser to Drive.
+7. Server verifies only the Drive envelope, base freshness, PR policy, and bounded title/body. No diff, diff ID, base files, proposal files, or ZIP bytes enter the RPC.
+8. Create `pull-<uuid>` folder, move/rename the proposal to `pull-<uuid>.zip`, persist its base artifact ID and Drive SHA-256, append `pull.created`, persist mention additions, and delete the empty stage.
 
 ### 11.7 PR review display
 
-Selected detail loads only its thread document, then downloads/extracts compact PR ZIP. Before content comes from PR-captured base sidecars where present; otherwise current repository file metadata may lack content and the UI says content not loaded. Therefore the current review is neither a full immutable creation-time diff nor always a fully hydrated current-tree diff; hashes and changed-file ZIP remain authoritative.
+Selected detail loads only its thread document, then the browser downloads/extracts the creation-time base ZIP and complete proposal ZIP with file-count, compressed-size, expanded-size, per-file-size, compression-ratio, path, duplicate/collision, encryption, symlink, method, and header consistency checks. It computes and caches the diff only in browser memory. The backend and Drive JSON never receive the diff.
 
 ### 11.8 Preview merged ZIP
 
-Require open PR. Load current repository and compact PR snapshots. Delete every path marked deleted, overwrite/add compact PR files, sort paths, filter export-forbidden metadata, build ZIP in browser, and download it. Do not mutate Drive.
+Require an open PR. Load the complete proposal snapshot, rebuild it as a normalized ZIP in the browser, and download it. Do not mutate Drive.
 
 ### 11.9 Merge
 
-1. Client synthesizes merged files exactly as preview does.
-2. Build complete replacement ZIP and begin `pull-merge`, pinned to current repository ZIP ID and PR number.
-3. Server verifies actor/session/ticket, reloads full selected PR detail, checks open state, PR enabled, repository not archived, merge permission, and review rule.
-4. Verify staged ZIP metadata and repository file metadata.
-5. Move new ZIP into repository folder as `harbur.repository.zip`.
-6. Compute its SHA-256, append immutable snapshot/event with source `pull_request.merged`, mark PR merged, update manifest timestamp in global state, and append activity.
+1. Client verifies that the current repository artifact ID still equals the PR base ID and safely loads the complete proposal for local metadata hydration.
+2. Client sends only repository identity and PR number. There is no merge upload or merge ticket.
+3. Server reloads full selected PR detail and checks open state, PR enabled, repository not archived, merge permission, strict base equality, proposal presence/checksum, and any artifact-bound review rule.
+4. Server asks Google Drive to copy the stored proposal ZIP into a staging folder. ZIP bytes do not pass through browser or backend during promotion.
+5. Move the exact copied ZIP into the repository folder as `harbur.repository.zip`.
+6. Append immutable snapshot/event metadata with source `pull_request.merged`, mark PR merged, update manifest timestamp in global state, and append activity.
 7. Save versioned repository index, then global app-data. Delete the old ZIP only if no snapshot record references it; normally the pre-merge canonical ZIP is retained as historical snapshot storage.
-8. Delete stage folder and invalidate browser repository ZIP cache.
+8. Delete the stage folder and seed the browser repository cache with the already-loaded proposal files. Persisted repository file metadata is intentionally empty until a browser hydrates it because the server does not inspect archive entries.
 
 There is no explicit PR-specific pre-merge ZIP field or post-merge pre-merge-download UI in the current code.
 
@@ -779,13 +775,13 @@ A mirror deletes the previous target root, ensures a fresh `Harbur` root, recrea
 - Append fold is idempotent by stable entity/comment/activity/notification IDs.
 - Compaction is best-effort: failure returns the fully materialized state and leaves append records for a future load.
 - Cleanup, backup triggers, notification delivery after a durable append, and obsolete artifact deletion are best-effort.
-- Staged PR/merge/sync commits use canonical ZIP ID as compare-and-swap. There is no content-level conflict resolver.
+- Staged PR/sync commits and PR promotion use canonical ZIP ID as compare-and-swap. There is no content-level conflict resolver; stale PRs must be recreated.
 - Repository creation, rename, Name remap, merge, and backup span multiple Drive files and are not atomic transactions. Cleanup reduces debris but cannot provide database-grade atomicity.
 - Unreadable existing state fails closed rather than silently resetting data.
 
 ## 13. PR auto-clean
 
-When `prAutoCleanDays > 0`, repository load finds PRs whose `createdAt` is before the cutoff regardless of open/closed/merged state. It removes them from the index, PR ZIP map, matching activity IDs, thread docs, append records, and compact PR ZIP files after successfully saving the new index. Historical repository snapshots retained in `repositorySnapshots` are not removed by this routine.
+When `prAutoCleanDays > 0`, repository load finds PRs whose `createdAt` is before the cutoff regardless of open/closed/merged state. It removes them from the index, PR ZIP map, matching activity IDs, thread docs, append records, and proposal ZIP files after successfully saving the new index. Historical repository snapshots retained in `repositorySnapshots` are not removed by this routine.
 
 ## 14. Timing and observability
 
@@ -912,40 +908,40 @@ When making substantial architectural changes, working through the layers in thi
 - Revoked private access also removes relevant returned notifications.
 - Admin creates repository from local folder with ignored/VCS files absent.
 - GitHub import uses tree/raw/blob APIs, rejects truncated trees, and honors feature toggle.
-- Upload body never passes through repository/PR completion RPC.
+- ZIP bodies never pass through application server requests or responses; direct browser/Drive transfer and Drive-side copies are used.
 - Tampered/expired/wrong-origin/wrong-actor ticket fails.
-- Changed Drive parent/name/size, duplicate/unsafe path, wrong hash, or stale base ZIP fails.
+- Changed Drive parent/name/size/checksum, unsafe or resource-exhausting client ZIP, or stale base ZIP fails.
 - Issue and PR append records survive concurrent distinct writes and compact after five.
-- PR compact ZIP contains only added/modified files; deletion intent still merges correctly.
+- PR completion and merge RPCs contain no diff, diff ID, base/proposal files, or ZIP body.
 - Author cannot review own PR; reviewed policy requires another merge-capable user.
-- Merge produces exact expected file set, snapshot SHA-256 event, and retained referenced old ZIP.
+- Merge promotes the exact stored proposal through a Drive-side copy and retains the referenced old ZIP.
 - Download cleanup schedules on both success and failure.
 - Backup contains artifacts and restorable state but no backup credentials or targets.
 - Name change remaps owned routes while email authorship remains stable.
 - Integration private list/events require exact timing-safe Bearer token.
-- Exact snapshot route rejects byte-length or digest mismatch.
+- Exact snapshot route redirects to a temporary Drive-side copy without proxying bytes.
 
 ## 18. Test coverage
 
-The 32 unit tests cover:
+The unit tests cover:
 
 - conservative settings defaults and limited repository policy schema;
 - exact normalized admin allowlist;
-- unsafe/VCS/app-metadata path behavior and repository-name validation;
+- unsafe/VCS/app-metadata path behavior, bounded ZIP extraction, and repository-name validation;
 - GitHub mirror metadata/name inference/default policy;
 - root `.gitignore` counts/archive filtering;
 - bounded detached download cleanup and credential-free media URLs;
 - repository fuzzy search;
 - issue ownership transitions;
-- PR changed-file compaction, preview/merge file parity, permission/review rules, private grants, binary hashes;
+- client-only PR diffing, immutable proposal behavior, permission/review rules, private grants, binary hashes;
 - mention resolution including self-mentions;
 - GitHub API/raw fetch and blob fallback;
-- staged repository/PR/merge browser ZIP workflows and base-ZIP pinning;
-- client ZIP cache hydration;
+- staged repository/PR browser ZIP workflows, direct Drive-side merge copy, and base-ZIP pinning;
+- client ZIP/diff cache hydration without app-state persistence;
 - quota rejection before Drive session creation;
 - monotonic exact-revision integration events and constant-time credential checks.
 
-Baseline on 2026-08-14: 4 test files and all 32 tests pass; TypeScript check passes; production build passes.
+Baseline on 2026-08-14: TypeScript, lint, unit tests, production build, and high-severity dependency audit pass.
 
 ## 19. Decision ledger and rationale
 
@@ -953,7 +949,8 @@ Baseline on 2026-08-14: 4 test files and all 32 tests pass; TypeScript check pas
 | --- | --- |
 | ZIP snapshots instead of Git | Accessible folder workflow and portable artifacts; loses Git history and conflict semantics |
 | Google Drive as only durable store | Minimal infrastructure and user ownership; accepts API latency, quota, and multi-file consistency limits |
-| Browser owns ZIP/diff/merge | Avoids serverless body/memory/time limits; requires capable browser and carefully signed direct transfer |
+| Browser owns ZIP extraction/diff | Keeps archive bytes and untrusted diff data away from the backend; requires bounded extraction and a capable browser |
+| Drive-side exact proposal promotion | A malicious client cannot substitute merge bytes or metadata; stale bases are rejected rather than rebased |
 | Server-created direct upload URL | Keeps Drive tokens secret while bypassing app-server archive transfer |
 | Temporary public download copy | Enables browser CORS/media fetch without exposing canonical files/tokens; creates cleanup complexity and requires restricted API key |
 | Append files for thread writes | Reduces hot shared-index conflicts; reads must fold and periodically compact |
@@ -961,7 +958,7 @@ Baseline on 2026-08-14: 4 test files and all 32 tests pass; TypeScript check pas
 | Base ZIP ID pinning | Rejects stale PR/merge/mirror output without building a conflict engine |
 | FNV-1a per-file and SHA-256 archive | Cheap browser diffs plus cryptographic immutable revisions |
 | Email stable, Name mutable | Reliable authorization/authorship with user-friendly URLs and mentions; renames require key remap |
-| Route-scoped hydration and sidecars | Avoids full ZIP reads for normal pages; some large diff before-content can be unavailable |
+| Route-scoped hydration and memory-only diff cache | Keeps diff data client-only; selected PR review downloads both complete artifacts |
 | Opportunistic sync/cleanup | Works on stateless serverless without scheduler; maintenance occurs only when relevant traffic/writes happen |
 | Strict README rendering | Supports rich docs while avoiding raw-HTML and Mermaid script risk |
 | Exact admin allowlist | Simple, auditable global role with no wildcard surprises |
@@ -987,10 +984,9 @@ The following product-description, diagram, configuration, and runtime details d
 13. Vitest prints `ReferenceError: module is not defined` from React plus a delayed-close warning, yet reports all tests passing and exits successfully.
 14. `predev` runs the formatter, so starting development can modify source formatting.
 15. Netlify says publish `dist`, while the current Nitro build outputs `.output`; deployment needs explicit confirmation.
-16. Public integration snapshot verification downloads archives server-side with a default 256 MiB guard, while repository upload defaults allow 2 GiB. Large exact snapshots can therefore fail integration download.
-17. Snapshot metadata/events live in one global document and grow without pruning.
-18. Names may contain spaces and are placed into URL path params; all navigation must preserve router encoding.
-19. Repository settings and owner-Name changes update the manifest objects stored in global app-data but do not rewrite existing `harbur.repository.json` files, so portable manifests can retain creation-time owner/name/access/policy values.
+16. Snapshot metadata/events live in one global document and grow without pruning.
+17. Names may contain spaces and are placed into URL path params; all navigation must preserve router encoding.
+18. Repository settings and owner-Name changes update the manifest objects stored in global app-data but do not rewrite existing `harbur.repository.json` files, so portable manifests can retain creation-time owner/name/access/policy values.
 
 ## 21. Production hardening opportunities (not current behavior)
 
@@ -1003,7 +999,6 @@ These changes are not currently implemented, but are useful candidates for futur
 - Resolve the Netlify output directory and Node version mismatch.
 - Add a real pre-merge artifact UX if PR-specific rollback is a product requirement.
 - Cap/prune integration events and snapshots with a retention contract.
-- Add server-side verification that compact PR ZIP bytes match all submitted changed-file hashes, not only supplied sidecar content and Drive envelope metadata.
 - Strengthen cross-document rename/merge recovery with operation journals.
 - Fix test-process shutdown noise and add route/server integration tests.
 - Add accessibility and multi-browser testing for folder upload.

@@ -10,18 +10,14 @@ import {
 	canOwnRepository,
 	isAdminEmail,
 } from "../../src/lib/auth"
-import {
-	downloadRepositoryZipFile,
-	type ClientZipWorkflowContext,
-} from "../../src/lib/client-zip-workflows"
+import { downloadRepositoryZipFile } from "../../src/lib/client-zip-workflows"
+import type { ClientZipWorkflowContext } from "../../src/lib/client-zip-contract"
 import { transitionIssueState, type IssueRecord } from "../../src/lib/issues"
 import { resolveMentionedUsers, type AppState } from "../../src/lib/drive-state"
 import { googleDrivePublicFileMediaUrl } from "../../src/lib/google-drive"
 import {
-	applyPullRequestFiles,
-	compactPullRequestChanges,
-	diffRepositoryFiles,
 	assertCanMergePullRequest,
+	diffRepositoryFiles,
 	type PullRequestRecord,
 } from "../../src/lib/pulls"
 import {
@@ -46,7 +42,7 @@ import {
 	prepareClientUploadArchive,
 	summarizeClientUploadFiles,
 } from "../../src/lib/upload-client"
-import { unzipBlob } from "../../src/lib/zip"
+import { unzipBlob, zipFilesToBlob } from "../../src/lib/zip"
 
 const files: RepositoryFile[] = [
 	{ path: "README.md", content: "hello", size: 5 },
@@ -87,7 +83,7 @@ function zipDownloadContext(
 		revokeZipDownload,
 		completeRepositoryUpload: unused,
 		completePullRequestUpload: unused,
-		completePullRequestMergeUpload: unused,
+		mergePullRequest: unused,
 		completeGitHubMirrorSyncUpload: unused,
 		downloadRepositoryZip: async () => ({
 			name: "demo.zip",
@@ -95,6 +91,7 @@ function zipDownloadContext(
 			downloadTicket: "signed-cleanup-ticket",
 		}),
 		downloadPullRequestZip: unused,
+		downloadPullRequestBaseZip: unused,
 	}
 }
 
@@ -150,8 +147,54 @@ describe("settings and auth", () => {
 describe("repository safety", () => {
 	it("blocks VCS metadata and unsafe traversal", () => {
 		expect(isBlockedVcsPath("src/.git/config")).toBe(true)
+		expect(isBlockedVcsPath("src/.GIT/config")).toBe(true)
 		expect(isBlockedVcsPath("_FOSSIL_")).toBe(true)
 		expect(isUnsafePath("../secret")).toBe(true)
+		expect(isUnsafePath("C:\\secret.txt")).toBe(true)
+		expect(isUnsafePath("CON.txt")).toBe(true)
+		expect(isUnsafePath("src/file:name.txt")).toBe(true)
+		expect(isUnsafePath("src/trailing. ")).toBe(true)
+		expect(isUnsafePath("e\u0301.txt")).toBe(true)
+	})
+
+	it("rejects unsafe and resource-exhausting ZIP entries before extraction", async () => {
+		const unsafeArchive = await zipFilesToBlob({
+			files: [
+				{ path: "../secret.txt", bytes: new TextEncoder().encode("secret") },
+			],
+			level: 3,
+		})
+		await expect(unzipBlob(unsafeArchive)).rejects.toThrow("Unsafe ZIP entry")
+
+		const collidingArchive = await zipFilesToBlob({
+			files: [
+				{ path: "src/File.ts", bytes: new Uint8Array([1]) },
+				{ path: "src/file.ts", bytes: new Uint8Array([2]) },
+			],
+			level: 3,
+		})
+		await expect(unzipBlob(collidingArchive)).rejects.toThrow(
+			"Duplicate or colliding ZIP entry",
+		)
+
+		const compressedArchive = await zipFilesToBlob({
+			files: [
+				{
+					path: "repeated.txt",
+					bytes: new TextEncoder().encode("a".repeat(10_000)),
+				},
+			],
+			level: 9,
+		})
+		await expect(
+			unzipBlob(compressedArchive, {
+				maxArchiveBytes: 100_000,
+				maxTotalBytes: 20_000,
+				maxSingleFileBytes: 20_000,
+				maxFiles: 10,
+				maxCompressionRatio: 2,
+			}),
+		).rejects.toThrow("compression ratio is unsafe")
 	})
 
 	it("excludes app metadata from downloads", () => {
@@ -294,6 +337,8 @@ describe("repository safety", () => {
 			"cleanupDelayMs",
 			"cleanupGraceMs",
 			"stagedDownloadSweepMaxDeletes",
+			"maxLinkCreationsPerWindow",
+			"linkCreationWindowMs",
 		])
 	})
 
@@ -329,6 +374,7 @@ describe("repository safety", () => {
 		expect(download.name).toBe("demo.zip")
 		expect(fetch).toHaveBeenCalledWith(
 			"https://www.googleapis.com/drive/v3/files/temp?alt=media",
+			{ credentials: "omit", referrerPolicy: "strict-origin" },
 		)
 		expect(revokeZipDownload).not.toHaveBeenCalled()
 		await vi.advanceTimersByTimeAsync(cleanupDelayMs)
@@ -411,35 +457,26 @@ describe("issues", () => {
 })
 
 describe("pull requests", () => {
-	it("stores only changed uploaded files", () => {
+	it("computes changed files without trusting hash equality", () => {
 		const uploaded = [
 			{ path: "README.md", content: "hello", size: 5 },
-			{ path: "src/index.ts", content: "console.log(2)", size: 14 },
+			{
+				path: "src/index.ts",
+				content: "console.log(2)",
+				size: 14,
+				contentHash: "same-hash",
+			},
 			{ path: "src/new.ts", content: "export {}", size: 9 },
 		]
-		expect(
-			diffRepositoryFiles(files, uploaded).map((diff) => diff.status),
-		).toContain("modified")
-		expect(
-			compactPullRequestChanges(files, uploaded).map((file) => file.path),
-		).toEqual(["src/index.ts", "src/new.ts"])
-	})
-
-	it("builds the same file set that an open PR would merge", () => {
-		const merged = applyPullRequestFiles(files, {
-			diff: [
-				{ path: "README.md", status: "deleted" },
-				{ path: "src/index.ts", status: "modified" },
-				{ path: "src/new.ts", status: "added" },
-			],
-			files: [
-				{ path: "src/index.ts", content: "console.log(2)", size: 14 },
-				{ path: "src/new.ts", content: "export {}", size: 9 },
-			],
-		})
-		expect(merged.map((file) => file.path)).toEqual([
-			"src/index.ts",
-			"src/new.ts",
+		const collidingBase = files.map((file) =>
+			file.path === "src/index.ts"
+				? { ...file, contentHash: "same-hash" }
+				: file,
+		)
+		expect(diffRepositoryFiles(collidingBase, uploaded)).toMatchObject([
+			{ path: "README.md", status: "unchanged" },
+			{ path: "src/index.ts", status: "modified" },
+			{ path: "src/new.ts", status: "added" },
 		])
 	})
 
@@ -469,6 +506,9 @@ describe("pull requests", () => {
 			),
 		).toThrow("Review")
 		pr.reviewedBy = "reviewer@example.com"
+		pr.baseRepositoryZipFileId = "base-zip"
+		pr.reviewedBaseRepositoryZipFileId = "base-zip"
+		pr.reviewedProposalZipFileId = "proposal-zip"
 		expect(() =>
 			assertCanMergePullRequest(
 				{ id: "m1", email: "maintainer@example.com", role: "user" },

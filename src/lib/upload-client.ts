@@ -125,9 +125,31 @@ export async function buildClientZipBlob({
 	})
 }
 
-export async function repositoryFilesFromZipBlob(blob: Blob) {
+export async function repositoryFilesFromZipBlob(
+	blob: Blob,
+	settings?: AppSettings,
+	kind: "repository" | "pull-request" = "repository",
+) {
+	const maxTotalBytes = settings
+		? kind === "pull-request"
+			? settings.uploadLimits.maxPrUploadBytes
+			: settings.uploadLimits.maxRepoUploadBytes
+		: undefined
 	const files = await Promise.all(
-		(await unzipBlob(blob)).map((entry) =>
+		(
+			await unzipBlob(
+				blob,
+				settings && maxTotalBytes !== undefined
+					? {
+							maxArchiveBytes: maxTotalBytes,
+							maxTotalBytes,
+							maxSingleFileBytes: settings.uploadLimits.maxSingleFileBytes,
+							maxFiles: settings.uploadLimits.maxFilesPerUpload,
+							maxCompressionRatio: 100,
+						}
+					: undefined,
+			)
+		).map((entry) =>
 			repositoryFileFromBytes({
 				path: entry.path,
 				bytes: entry.bytes,
@@ -164,29 +186,6 @@ export function clientUploadMetadata(
 			encoding: sidecar.encoding,
 		}
 	})
-}
-
-export function pullRequestBaseSidecarMetadata(
-	files: RepositoryFile[],
-): ClientUploadFileMetadata[] {
-	const sidecars: ClientUploadFileMetadata[] = []
-	let bytes = 0
-	for (const file of files) {
-		if (sidecars.length >= APP_STORAGE.pullRequestBaseSidecarMaxFiles) break
-		if (bytes + file.size > APP_STORAGE.pullRequestBaseSidecarMaxBytes) {
-			continue
-		}
-		bytes += file.size
-		const fileBytes = repositoryFileBytes(file)
-		sidecars.push({
-			path: file.path,
-			size: file.size,
-			contentHash: file.contentHash ?? contentHashForBytes(fileBytes),
-			modifiedAt: file.modifiedAt,
-			...contentValue(fileBytes),
-		})
-	}
-	return sidecars
 }
 
 export function uploadBlobToGoogleDriveSession({

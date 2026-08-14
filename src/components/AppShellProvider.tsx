@@ -7,6 +7,7 @@ import {
 	useRef,
 	useState,
 } from "react"
+import { createClientOnlyFn } from "@tanstack/react-start"
 import {
 	isGoogleLoginConfigured,
 	preloadGoogleIdentityServices,
@@ -16,10 +17,14 @@ import {
 } from "../lib/google-auth-client"
 import { ANONYMOUS_ACTOR } from "../lib/auth"
 import {
+	clearClientZipWorkflowCache,
 	createClientZipWorkflowCache,
-	type BeginZipUploadData,
-	type ClientZipWorkflowContext,
-} from "../lib/client-zip-workflows"
+	type ClientPullRequestDiffSnapshot,
+} from "../lib/client-zip-cache"
+import type {
+	BeginZipUploadData,
+	ClientZipWorkflowContext,
+} from "../lib/client-zip-contract"
 import type { DownloadFile } from "../lib/download-client"
 import type { IssueState } from "../lib/issues"
 import type { AppState, UploadProgress } from "../lib/drive-state"
@@ -36,6 +41,7 @@ import {
 	connectBackupDriveServer,
 	connectOwnerDriveServer,
 	createIssueServer,
+	createPullRequestBaseZipDownloadLinkServer,
 	createPullRequestZipDownloadLinkServer,
 	createRepositoryZipDownloadLinkServer,
 	deleteBackupDriveServer,
@@ -77,9 +83,9 @@ function hasDueGitHubMirrorSync(state: AppState) {
 	})
 }
 
-async function loadZipWorkflows() {
-	return await import("../lib/client-zip-workflows")
-}
+const loadZipWorkflows = createClientOnlyFn(
+	async () => await import("../lib/client-zip-workflows"),
+)
 
 type AppShellState = {
 	actor: Actor
@@ -93,6 +99,7 @@ type AppShellState = {
 	isSigningIn: boolean
 	user: GoogleIdentityProfile | null
 	driveState: AppState | null
+	pullRequestDiffs: Record<string, ClientPullRequestDiffSnapshot>
 	uploadProgress: UploadProgress | null
 	error: string | null
 	loadRepositoryDetail: (
@@ -210,8 +217,6 @@ function mergeDriveStates(current: AppState | null, incoming: AppState) {
 	const loadedRepositoryIdSet = new Set(loadedRepositoryIds)
 	const loadedRepositoryFileIds = incoming.loadedRepositoryFileIds ?? []
 	const loadedRepositoryReadmeIds = incoming.loadedRepositoryReadmeIds ?? []
-	const loadedPullRequestFileIds = incoming.loadedPullRequestFileIds ?? []
-	const loadedPullRequestFileIdSet = new Set(loadedPullRequestFileIds)
 	const loadedThreadIdSet = new Set(incoming.loadedThreadIds ?? [])
 
 	return {
@@ -247,7 +252,6 @@ function mergeDriveStates(current: AppState | null, incoming: AppState) {
 			current.pullRequests,
 			incoming.pullRequests,
 			loadedRepositoryIdSet,
-			loadedPullRequestFileIdSet,
 			loadedThreadIdSet,
 		),
 		pullRequestZipFileIds: {
@@ -281,12 +285,6 @@ function mergeDriveStates(current: AppState | null, incoming: AppState) {
 				...loadedRepositoryReadmeIds,
 			]),
 		],
-		loadedPullRequestFileIds: [
-			...new Set([
-				...(current.loadedPullRequestFileIds ?? []),
-				...loadedPullRequestFileIds,
-			]),
-		],
 		loadedThreadIds: [
 			...new Set([
 				...(current.loadedThreadIds ?? []),
@@ -304,7 +302,6 @@ function mergePullRequestMaps(
 	current: AppState["pullRequests"],
 	incoming: AppState["pullRequests"],
 	loadedRepositoryIds: Set<string>,
-	loadedPullRequestFileIds: Set<string>,
 	loadedThreadIds: Set<string>,
 ) {
 	const records = { ...current }
@@ -313,7 +310,6 @@ function mergePullRequestMaps(
 			? mergePullRequestRecords(
 					records[repositoryId] ?? [],
 					incomingRecords,
-					loadedPullRequestFileIds,
 					loadedThreadIds,
 				)
 			: incomingRecords
@@ -324,19 +320,13 @@ function mergePullRequestMaps(
 function mergePullRequestRecords(
 	current: AppState["pullRequests"][string],
 	incoming: AppState["pullRequests"][string],
-	loadedPullRequestFileIds: Set<string>,
 	loadedThreadIds: Set<string>,
 ) {
 	const records = new Map(current.map((record) => [record.id, record]))
 	for (const record of incoming) {
 		const existing = records.get(record.id)
 		const merged = mergeThreadRecord(existing, record, loadedThreadIds)
-		records.set(
-			record.id,
-			!loadedPullRequestFileIds.has(record.id) && existing?.files.length
-				? { ...merged, files: existing.files }
-				: merged,
-		)
+		records.set(record.id, merged)
 	}
 	return [...records.values()]
 		.sort(compareThreadRecords)
@@ -491,6 +481,9 @@ export default function AppShellProvider({
 	const downloadPullRequestZipFn = useServerFn(
 		createPullRequestZipDownloadLinkServer,
 	)
+	const downloadPullRequestBaseZipFn = useServerFn(
+		createPullRequestBaseZipDownloadLinkServer,
+	)
 	const downloadRepositoryZipFn = useServerFn(
 		createRepositoryZipDownloadLinkServer,
 	)
@@ -498,6 +491,9 @@ export default function AppShellProvider({
 
 	const [user, setUser] = useState<GoogleIdentityProfile | null>(null)
 	const [driveState, setDriveState] = useState<AppState | null>(null)
+	const [pullRequestDiffs, setPullRequestDiffs] = useState<
+		Record<string, ClientPullRequestDiffSnapshot>
+	>({})
 	const [providerStatus, setProviderStatus] =
 		useState<AppShellState["providerStatus"]>("loading")
 	const [error, setError] = useState<string | null>(null)
@@ -621,14 +617,15 @@ export default function AppShellProvider({
 				await completeRepositoryUploadFn({ data }),
 			completePullRequestUpload: async (data) =>
 				await completePullRequestUploadFn({ data }),
-			completePullRequestMergeUpload: async (data) =>
-				await mergePullRequestFn({ data }),
+			mergePullRequest: async (data) => await mergePullRequestFn({ data }),
 			completeGitHubMirrorSyncUpload: async (data) =>
 				await completeGitHubMirrorSyncUploadFn({ data }),
 			downloadRepositoryZip: async (data) =>
 				await downloadRepositoryZipFn({ data }),
 			downloadPullRequestZip: async (data) =>
 				await downloadPullRequestZipFn({ data }),
+			downloadPullRequestBaseZip: async (data) =>
+				await downloadPullRequestBaseZipFn({ data }),
 		}
 	}, [
 		beginZipUploadFn,
@@ -638,6 +635,7 @@ export default function AppShellProvider({
 		completeRepositoryUploadFn,
 		downloadRepositoryZipFn,
 		downloadPullRequestZipFn,
+		downloadPullRequestBaseZipFn,
 		mergePullRequestFn,
 		repositoryRootFolderId,
 		revokeZipDownloadFn,
@@ -714,6 +712,8 @@ export default function AppShellProvider({
 
 	async function signOut() {
 		await logoutSessionFn()
+		clearClientZipWorkflowCache(zipWorkflowCache.current)
+		setPullRequestDiffs({})
 		setUser(null)
 		setDriveState(await getDriveStateFn())
 		setProviderStatus(
@@ -746,15 +746,44 @@ export default function AppShellProvider({
 		})
 		const mergedState = mergeDriveStates(driveState, nextState)
 		applyDriveState(nextState)
+		const zipWorkflows = await loadZipWorkflows()
+		if (!(mergedState.repositoryFiles[repositoryId]?.length ?? 0)) {
+			const snapshot = await zipWorkflows.loadRepositoryZipSnapshot(
+				zipWorkflowContext(),
+				zipWorkflowCache.current,
+				repositoryId,
+			)
+			applyDriveState({
+				...mergedState,
+				repositoryFiles: {
+					...mergedState.repositoryFiles,
+					[repositoryId]: snapshot.files,
+				},
+				loadedRepositoryFileIds: [
+					...new Set([
+						...(mergedState.loadedRepositoryFileIds ?? []),
+						repositoryId,
+					]),
+				],
+			})
+		}
 		if (options?.pullRequestNumber) {
-			const { loadPullRequestZipSnapshot } = await loadZipWorkflows()
-			await loadPullRequestZipSnapshot(
+			const snapshot = await zipWorkflows.loadPullRequestDiffSnapshot(
 				zipWorkflowContext(),
 				zipWorkflowCache.current,
 				repositoryId,
 				options.pullRequestNumber,
 				mergedState,
 			)
+			const pullRequest = mergedState.pullRequests[repositoryId]?.find(
+				(candidate) => candidate.number === options.pullRequestNumber,
+			)
+			if (pullRequest) {
+				setPullRequestDiffs((current) => ({
+					...current,
+					[pullRequest.id]: snapshot,
+				}))
+			}
 		}
 	}
 
@@ -1030,9 +1059,9 @@ export default function AppShellProvider({
 		requireReadySession()
 		setUploadProgress(null)
 		try {
-			const { mergePullRequestWithClientZip } = await loadZipWorkflows()
+			const { mergePullRequestWithProposal } = await loadZipWorkflows()
 			applyDriveState(
-				await mergePullRequestWithClientZip({
+				await mergePullRequestWithProposal({
 					context: zipWorkflowContext(),
 					cache: zipWorkflowCache.current,
 					repositoryId,
@@ -1071,6 +1100,7 @@ export default function AppShellProvider({
 		isSigningIn,
 		user,
 		driveState,
+		pullRequestDiffs,
 		uploadProgress,
 		error,
 		loadRepositoryDetail,

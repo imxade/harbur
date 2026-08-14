@@ -59,6 +59,9 @@
 		"vite": "^8.0.10",
 		"vitest": "^4.1.5"
 	},
+	"overrides": {
+		"nanoid": "^3.3.18"
+	},
 	"pnpm": {
 		"onlyBuiltDependencies": [
 			"esbuild",

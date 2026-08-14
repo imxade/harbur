@@ -40,6 +40,7 @@ export function RepositoryPage({
 		editPullRequestTitle,
 		loadRepositoryDetail,
 		mergePullRequest,
+		pullRequestDiffs,
 		providerStatus,
 		reviewPullRequest,
 		signIn,
@@ -91,15 +92,12 @@ export function RepositoryPage({
 		!repositoryDetailsLoaded ||
 		!selectedPullRequest ||
 		Boolean(driveState?.loadedThreadIds?.includes(selectedPullRequest.id))
-	const selectedPullRequestFilesLoaded =
+	const selectedPullRequestDiffLoaded =
 		view !== "pulls" ||
 		typeof itemNumber !== "number" ||
 		!repositoryDetailsLoaded ||
 		!selectedPullRequest ||
-		selectedPullRequest.files.length > 0 ||
-		Boolean(
-			driveState?.loadedPullRequestFileIds?.includes(selectedPullRequest.id),
-		)
+		Boolean(pullRequestDiffs[selectedPullRequest.id])
 	const repositoryReady =
 		repositoryDetailsLoaded &&
 		repositoryReadmeLoaded &&
@@ -145,7 +143,7 @@ export function RepositoryPage({
 	}
 
 	useEffect(() => {
-		if (!manifest || (repositoryReady && selectedPullRequestFilesLoaded)) {
+		if (!manifest || (repositoryReady && selectedPullRequestDiffLoaded)) {
 			return
 		}
 		if (loadingRepositoryId === manifest.id) return
@@ -184,7 +182,7 @@ export function RepositoryPage({
 		manifest,
 		repositoryDetailError,
 		repositoryReady,
-		selectedPullRequestFilesLoaded,
+		selectedPullRequestDiffLoaded,
 		view,
 	])
 
@@ -371,8 +369,8 @@ export function RepositoryPage({
 					policy={manifest.policy}
 					maintainers={manifest.maintainers}
 					accessGrants={manifest.access ?? []}
-					baseFiles={currentDriveState.repositoryFiles[manifest.id] ?? []}
 					pullRequests={currentDriveState.pullRequests[manifest.id] ?? []}
+					pullRequestDiffs={pullRequestDiffs}
 					users={currentDriveState.users}
 					itemNumber={itemNumber}
 					newPullRequest={newPullRequest}

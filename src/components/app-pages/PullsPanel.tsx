@@ -4,7 +4,8 @@ import { useState } from "react"
 import type { FormEvent } from "react"
 import { isAnonymousEmail } from "../../lib/auth"
 import { saveDownloadFile, type DownloadFile } from "../../lib/download-client"
-import type { FileDiff, PullRequestState } from "../../lib/pulls"
+import type { ClientPullRequestDiffSnapshot } from "../../lib/client-zip-cache"
+import type { PullRequestState } from "../../lib/pulls"
 import { displayOwnerName } from "../../lib/users"
 import { FileDiffView } from "./FileDiffView"
 import { UploadProgressStatus } from "./LoadingStates"
@@ -36,9 +37,6 @@ type PullRequestItem = {
 	createdAt: string
 	updatedAt?: string
 	editedAt?: string
-	files: RepositoryContentFile[]
-	baseFiles?: RepositoryContentFile[]
-	diff: FileDiff[]
 	comments: PullRequestComment[]
 }
 
@@ -66,9 +64,9 @@ type PullsPanelProps = {
 	}
 	maintainers: Array<{ email: string; permissions?: string[] }>
 	accessGrants: Array<{ email: string }>
-	baseFiles: RepositoryContentFile[]
 	users: Record<string, { ownerName: string }>
 	pullRequests: PullRequestItem[]
+	pullRequestDiffs: Record<string, ClientPullRequestDiffSnapshot>
 	itemNumber?: number
 	newPullRequest?: boolean
 	onCreatePullRequest: (input: {
@@ -112,8 +110,8 @@ export function PullsPanel({
 	policy,
 	maintainers,
 	accessGrants,
-	baseFiles,
 	pullRequests,
+	pullRequestDiffs,
 	users,
 	itemNumber,
 	newPullRequest,
@@ -148,6 +146,7 @@ export function PullsPanel({
 		stateFilter === "open" ? pr.state === "open" : pr.state !== "open",
 	)
 	const selected = pullRequests.find((pr) => pr.number === itemNumber)
+	const selectedDiff = selected ? pullRequestDiffs[selected.id] : undefined
 	const ownerForEmail = (email: string) => displayOwnerName(email, users)
 	const maintainerEmails = maintainers.map((maintainer) =>
 		maintainer.email.toLowerCase(),
@@ -458,17 +457,23 @@ export function PullsPanel({
 								</div>
 							</div>
 							<div className="space-y-3">
-								{selected.diff.map((fileDiff) => (
+								{selectedDiff?.diff.map((fileDiff) => (
 									<FileDiffView
 										key={`${fileDiff.path}:${fileDiff.status}`}
 										diff={fileDiff}
 										before={findFileContent(
-											selected.baseFiles ?? baseFiles,
+											selectedDiff.baseFiles,
 											fileDiff.path,
 										)}
-										after={findFileContent(selected.files, fileDiff.path)}
+										after={findFileContent(
+											selectedDiff.proposalFiles,
+											fileDiff.path,
+										)}
 									/>
 								))}
+								{!selectedDiff ? (
+									<div className="alert">Calculating diff in this browser…</div>
+								) : null}
 							</div>
 						</div>
 					</div>
@@ -510,8 +515,7 @@ export function PullsPanel({
 							#{pr.number} {pr.title}
 						</div>
 						<div className="break-words text-sm text-base-content/60">
-							{pr.state} by {ownerForEmail(pr.authorEmail)}; {pr.diff.length}{" "}
-							changed files
+							{pr.state} by {ownerForEmail(pr.authorEmail)}
 						</div>
 					</Link>
 				))}

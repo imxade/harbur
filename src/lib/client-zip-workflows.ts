@@ -1,146 +1,28 @@
+import "@tanstack/react-start/client-only"
 import { APP_DOWNLOAD, APP_TIMING } from "./app-config"
+import type {
+	ClientPullRequestDiffSnapshot,
+	ClientZipWorkflowCache,
+} from "./client-zip-cache"
+import type {
+	BeginZipUploadData,
+	ClientZipWorkflowContext,
+	ZipPayload,
+} from "./client-zip-contract"
 import type { DownloadFile } from "./download-client"
-import type { AppState, UploadProgress } from "./drive-state"
+import type { AppState } from "./drive-state"
 import { assertDriveQuotaAllowsUpload } from "./drive-quota"
 import { fetchGitHubRepositorySnapshot } from "./github"
-import {
-	applyPullRequestFiles,
-	compactPullRequestChanges,
-	diffRepositoryFiles,
-	type FileDiff,
-} from "./pulls"
-import { filesForDownload } from "./repositories"
+import { diffRepositoryFiles } from "./pulls"
 import { prepareRepositoryUploadFiles } from "./repositories/uploads"
-import type { GitHubMirror, RepositoryFile } from "./types"
 import {
 	buildClientZipBlob,
 	clientUploadMetadata,
 	prepareClientUploadArchive,
 	prepareClientUploadSnapshot,
-	pullRequestBaseSidecarMetadata,
 	repositoryFilesFromZipBlob,
 	uploadBlobToGoogleDriveSession,
-	type ClientUploadFileMetadata,
 } from "./upload-client"
-
-export type BeginZipUploadData =
-	| {
-			kind: "repository"
-			name: string
-			zipBytes: number
-			origin: string
-	  }
-	| {
-			kind: "pull-request"
-			repositoryId: string
-			repositoryRootFolderId?: string
-			baseRepositoryZipFileId: string
-			zipBytes: number
-			origin: string
-	  }
-	| {
-			kind: "pull-merge"
-			repositoryId: string
-			repositoryRootFolderId?: string
-			pullRequestNumber: number
-			baseRepositoryZipFileId: string
-			zipBytes: number
-			origin: string
-	  }
-	| {
-			kind: "github-mirror-sync"
-			repositoryId: string
-			repositoryRootFolderId?: string
-			baseRepositoryZipFileId: string
-			zipBytes: number
-			origin: string
-	  }
-
-type ZipUploadStart = {
-	uploadUrl: string
-	uploadTicket: string
-	repositoryRootFolderId?: string
-	uploadFolderId?: string
-}
-
-type ZipPayload = {
-	name: string
-	fetchUrl: string
-	downloadTicket: string
-}
-
-export type ClientZipWorkflowContext = {
-	getState: () => AppState | null
-	setState: (updater: (current: AppState | null) => AppState | null) => void
-	setProgress: (progress: UploadProgress | null) => void
-	getRepositoryRootFolderId: (repositoryId: string) => string | undefined
-	getOrigin: () => string
-	beginZipUpload: (data: BeginZipUploadData) => Promise<ZipUploadStart>
-	cancelZipUpload: (uploadTicket: string) => Promise<unknown>
-	revokeZipDownload: (downloadTicket: string) => Promise<unknown>
-	completeRepositoryUpload: (data: {
-		name: string
-		description?: string
-		repositoryZipFileId: string
-		uploadTicket: string
-		files: ClientUploadFileMetadata[]
-		githubMirror?: GitHubMirror
-	}) => Promise<AppState>
-	completePullRequestUpload: (data: {
-		repositoryId: string
-		repositoryRootFolderId?: string
-		title: string
-		body: string
-		uploadZipFileId: string
-		uploadTicket: string
-		files: ClientUploadFileMetadata[]
-		baseFiles: ClientUploadFileMetadata[]
-		diff: FileDiff[]
-	}) => Promise<AppState>
-	completePullRequestMergeUpload: (data: {
-		repositoryId: string
-		repositoryRootFolderId?: string
-		pullRequestNumber: number
-		repositoryZipFileId: string
-		uploadTicket: string
-		files: ClientUploadFileMetadata[]
-	}) => Promise<AppState>
-	completeGitHubMirrorSyncUpload: (data: {
-		repositoryId: string
-		repositoryRootFolderId?: string
-		repositoryZipFileId: string
-		uploadTicket: string
-		files: ClientUploadFileMetadata[]
-		githubMirror: GitHubMirror
-	}) => Promise<AppState>
-	downloadRepositoryZip: (data: {
-		repositoryId: string
-		repositoryRootFolderId?: string
-	}) => Promise<ZipPayload>
-	downloadPullRequestZip: (data: {
-		repositoryId: string
-		repositoryRootFolderId?: string
-		pullRequestNumber: number
-	}) => Promise<ZipPayload>
-}
-
-type ZipSnapshot = {
-	zipFileId?: string
-	files: RepositoryFile[]
-	blob: Blob
-}
-
-export type ClientZipWorkflowCache = {
-	repositoryZips: Map<string, ZipSnapshot>
-	pullRequestZips: Map<string, ZipSnapshot>
-}
-
-export function createClientZipWorkflowCache(): ClientZipWorkflowCache {
-	return {
-		repositoryZips: new Map(),
-		pullRequestZips: new Map(),
-	}
-}
 
 export async function uploadRepositoryFromFolder({
 	context,
@@ -264,22 +146,10 @@ export async function createPullRequestFromFolder({
 		baseSnapshot.files,
 		uploadSnapshot.files,
 	).filter((fileDiff) => fileDiff.status !== "unchanged")
-	const changedFiles = compactPullRequestChanges(
-		baseSnapshot.files,
-		uploadSnapshot.files,
-	)
 	if (!diff.length) throw new Error("Pull request has no changes.")
 	if (!baseSnapshot.zipFileId) throw new Error("Repository ZIP is missing.")
-	const baseDiffPaths = new Set(
-		diff
-			.filter((fileDiff) => fileDiff.status !== "added")
-			.map((fileDiff) => fileDiff.path),
-	)
-	const baseFiles = baseSnapshot.files.filter((file) =>
-		baseDiffPaths.has(file.path),
-	)
 	const blob = await buildClientZipBlob({
-		files: changedFiles,
+		files: uploadSnapshot.files,
 		onProgress: context.setProgress,
 	})
 	const repositoryRootFolderId = context.getRepositoryRootFolderId(repositoryId)
@@ -295,20 +165,38 @@ export async function createPullRequestFromFolder({
 		},
 		blob,
 	)
-	return await context.completePullRequestUpload({
+	const nextState = await context.completePullRequestUpload({
 		repositoryId,
 		repositoryRootFolderId,
 		title,
 		body,
 		uploadZipFileId: zipFile.id,
 		uploadTicket,
-		files: clientUploadMetadata(changedFiles),
-		baseFiles: pullRequestBaseSidecarMetadata(baseFiles),
-		diff,
 	})
+	const createdPullRequest = nextState.pullRequests[repositoryId]?.find(
+		(pullRequest) =>
+			nextState.pullRequestZipFileIds[pullRequest.id] === zipFile.id,
+	)
+	if (createdPullRequest?.baseRepositoryZipFileId) {
+		const proposalSnapshot = {
+			zipFileId: zipFile.id,
+			files: uploadSnapshot.files,
+		}
+		cache.pullRequestZips.set(createdPullRequest.id, proposalSnapshot)
+		cache.pullRequestBaseZips.set(createdPullRequest.id, baseSnapshot)
+		cache.pullRequestDiffs.set(createdPullRequest.id, {
+			baseZipFileId: createdPullRequest.baseRepositoryZipFileId,
+			proposalZipFileId: zipFile.id,
+			diff,
+			baseFiles: baseSnapshot.files,
+			proposalFiles: proposalSnapshot.files,
+		})
+		trimPullRequestCaches(cache)
+	}
+	return nextState
 }
 
-export async function mergePullRequestWithClientZip({
+export async function mergePullRequestWithProposal({
 	context,
 	cache,
 	repositoryId,
@@ -320,56 +208,48 @@ export async function mergePullRequestWithClientZip({
 	pullRequestNumber: number
 }) {
 	const state = requireState(context)
-	const baseSnapshot = await loadRepositoryZipSnapshot(
-		context,
-		cache,
-		repositoryId,
-	)
-	if (!baseSnapshot.zipFileId) throw new Error("Repository ZIP is missing.")
 	const pullRequest = findPullRequestByNumber(
 		state,
 		repositoryId,
 		pullRequestNumber,
 	)
+	if (
+		!pullRequest.baseRepositoryZipFileId ||
+		state.repositoryZipFileIds[repositoryId] !==
+			pullRequest.baseRepositoryZipFileId
+	) {
+		throw new Error(
+			"Repository changed after this pull request was created. Recreate the pull request from the current repository.",
+		)
+	}
 	const pullSnapshot = await loadPullRequestZipSnapshot(
 		context,
 		cache,
 		repositoryId,
 		pullRequestNumber,
 	)
-	const mergedFiles = applyPullRequestFiles(baseSnapshot.files, {
-		...pullRequest,
-		files: pullSnapshot.files,
-	})
-	const exportFiles = filesForDownload(mergedFiles)
-	const blob = await buildClientZipBlob({
-		files: exportFiles,
-		onProgress: context.setProgress,
-	})
 	const repositoryRootFolderId = context.getRepositoryRootFolderId(repositoryId)
-	const { uploadTicket, zipFile } = await uploadPreparedArchiveToDrive(
-		context,
-		{
-			kind: "pull-merge",
-			repositoryId,
-			repositoryRootFolderId,
-			pullRequestNumber,
-			baseRepositoryZipFileId: baseSnapshot.zipFileId,
-			zipBytes: blob.size,
-			origin: context.getOrigin(),
-		},
-		blob,
-	)
-	const nextState = await context.completePullRequestMergeUpload({
+	const nextState = await context.mergePullRequest({
 		repositoryId,
 		repositoryRootFolderId,
 		pullRequestNumber,
-		repositoryZipFileId: zipFile.id,
-		uploadTicket,
-		files: clientUploadMetadata(exportFiles, { includeSidecars: true }),
 	})
-	cache.repositoryZips.delete(repositoryId)
-	return nextState
+	const zipFileId = nextState.repositoryZipFileIds[repositoryId]
+	cache.repositoryZips.set(repositoryId, {
+		zipFileId,
+		files: pullSnapshot.files,
+	})
+	trimCache(cache.repositoryZips)
+	return {
+		...nextState,
+		repositoryFiles: {
+			...nextState.repositoryFiles,
+			[repositoryId]: pullSnapshot.files,
+		},
+		loadedRepositoryFileIds: [
+			...new Set([...(nextState.loadedRepositoryFileIds ?? []), repositoryId]),
+		],
+	}
 }
 
 export async function downloadRepositoryZipFile(
@@ -397,11 +277,6 @@ export async function downloadPullRequestPreviewZipFile({
 	pullRequestNumber: number
 }) {
 	const state = requireState(context)
-	const baseSnapshot = await loadRepositoryZipSnapshot(
-		context,
-		cache,
-		repositoryId,
-	)
 	const pullRequest = findPullRequestByNumber(
 		state,
 		repositoryId,
@@ -416,12 +291,8 @@ export async function downloadPullRequestPreviewZipFile({
 		repositoryId,
 		pullRequestNumber,
 	)
-	const mergedFiles = applyPullRequestFiles(baseSnapshot.files, {
-		...pullRequest,
-		files: pullSnapshot.files,
-	})
 	return {
-		blob: await buildClientZipBlob({ files: filesForDownload(mergedFiles) }),
+		blob: await buildClientZipBlob({ files: pullSnapshot.files }),
 		name: `${repositoryId.replaceAll("/", "-")}-pr-${pullRequestNumber}-merged.zip`,
 	} satisfies DownloadFile
 }
@@ -442,7 +313,6 @@ export async function loadPullRequestZipSnapshot(
 	const zipFileId = state.pullRequestZipFileIds[pullRequest.id]
 	const cached = cache.pullRequestZips.get(pullRequest.id)
 	if (cached && cached.zipFileId === zipFileId) {
-		storePullRequestFiles(context, repositoryId, pullRequest.id, cached.files)
 		return cached
 	}
 	const result = await context.downloadPullRequestZip({
@@ -451,13 +321,95 @@ export async function loadPullRequestZipSnapshot(
 		pullRequestNumber,
 	})
 	const download = await zipBlobFromResult(context, result)
+	await assertBlobSha256(download.blob, pullRequest.proposalZipSha256)
 	const snapshot = {
 		zipFileId,
-		blob: download.blob,
-		files: await repositoryFilesFromZipBlob(download.blob),
+		files: await repositoryFilesFromZipBlob(
+			download.blob,
+			state.settings,
+			"pull-request",
+		),
 	}
 	cache.pullRequestZips.set(pullRequest.id, snapshot)
-	storePullRequestFiles(context, repositoryId, pullRequest.id, snapshot.files)
+	trimPullRequestCaches(cache)
+	return snapshot
+}
+
+export async function loadPullRequestDiffSnapshot(
+	context: ClientZipWorkflowContext,
+	cache: ClientZipWorkflowCache,
+	repositoryId: string,
+	pullRequestNumber: number,
+	state: AppState | null = context.getState(),
+) {
+	if (!state) throw new Error("Repository state is still loading.")
+	const pullRequest = findPullRequestByNumber(
+		state,
+		repositoryId,
+		pullRequestNumber,
+	)
+	const baseZipFileId = pullRequest.baseRepositoryZipFileId
+	const proposalZipFileId = state.pullRequestZipFileIds[pullRequest.id]
+	if (!baseZipFileId || !proposalZipFileId) {
+		throw new Error("Legacy pull request artifacts are unavailable.")
+	}
+	const cached = cache.pullRequestDiffs.get(pullRequest.id)
+	if (
+		cached?.baseZipFileId === baseZipFileId &&
+		cached.proposalZipFileId === proposalZipFileId
+	) {
+		return cached
+	}
+	let baseSnapshot = cache.pullRequestBaseZips.get(pullRequest.id)
+	if (!baseSnapshot || baseSnapshot.zipFileId !== baseZipFileId) {
+		const currentRepositorySnapshot = cache.repositoryZips.get(repositoryId)
+		if (currentRepositorySnapshot?.zipFileId === baseZipFileId) {
+			baseSnapshot = currentRepositorySnapshot
+		}
+	}
+	if (!baseSnapshot || baseSnapshot.zipFileId !== baseZipFileId) {
+		const baseDownload = await zipBlobFromResult(
+			context,
+			await context.downloadPullRequestBaseZip({
+				repositoryId,
+				repositoryRootFolderId: context.getRepositoryRootFolderId(repositoryId),
+				pullRequestNumber,
+			}),
+		)
+		const expectedBaseSha256 = state.repositorySnapshots[repositoryId]?.find(
+			(snapshot) => snapshot.driveFileId === baseZipFileId,
+		)?.sha256
+		await assertBlobSha256(baseDownload.blob, expectedBaseSha256)
+		baseSnapshot = {
+			zipFileId: baseZipFileId,
+			files: await repositoryFilesFromZipBlob(
+				baseDownload.blob,
+				state.settings,
+				"repository",
+			),
+		}
+		cache.pullRequestBaseZips.set(pullRequest.id, baseSnapshot)
+		trimPullRequestCaches(cache)
+	}
+	const proposalSnapshot = await loadPullRequestZipSnapshot(
+		context,
+		cache,
+		repositoryId,
+		pullRequestNumber,
+		state,
+	)
+	const snapshot: ClientPullRequestDiffSnapshot = {
+		baseZipFileId,
+		proposalZipFileId,
+		diff: diffRepositoryFiles(
+			baseSnapshot.files,
+			proposalSnapshot.files,
+		).filter((fileDiff) => fileDiff.status !== "unchanged"),
+		baseFiles: baseSnapshot.files,
+		proposalFiles: proposalSnapshot.files,
+	}
+	cache.pullRequestDiffs.set(pullRequest.id, snapshot)
+	trimPullRequestCaches(cache)
 	return snapshot
 }
 
@@ -529,7 +481,7 @@ export async function syncDueGitHubMirrors({
 	}
 }
 
-async function loadRepositoryZipSnapshot(
+export async function loadRepositoryZipSnapshot(
 	context: ClientZipWorkflowContext,
 	cache: ClientZipWorkflowCache,
 	repositoryId: string,
@@ -545,10 +497,14 @@ async function loadRepositoryZipSnapshot(
 	const download = await zipBlobFromResult(context, result)
 	const snapshot = {
 		zipFileId,
-		blob: download.blob,
-		files: await repositoryFilesFromZipBlob(download.blob),
+		files: await repositoryFilesFromZipBlob(
+			download.blob,
+			state.settings,
+			"repository",
+		),
 	}
 	cache.repositoryZips.set(repositoryId, snapshot)
+	trimCache(cache.repositoryZips)
 	return snapshot
 }
 
@@ -584,40 +540,45 @@ async function uploadPreparedArchiveToDrive(
 	}
 }
 
-function storePullRequestFiles(
-	context: ClientZipWorkflowContext,
-	repositoryId: string,
-	pullRequestId: string,
-	files: RepositoryFile[],
-) {
-	context.setState((current) => {
-		if (!current) return current
-		const pullRequests = current.pullRequests[repositoryId] ?? []
-		return {
-			...current,
-			pullRequests: {
-				...current.pullRequests,
-				[repositoryId]: pullRequests.map((pullRequest) =>
-					pullRequest.id === pullRequestId
-						? { ...pullRequest, files }
-						: pullRequest,
-				),
-			},
-			loadedPullRequestFileIds: [
-				...new Set([
-					...(current.loadedPullRequestFileIds ?? []),
-					pullRequestId,
-				]),
-			],
-		}
-	})
+function trimCache<T>(cache: Map<string, T>, maxEntries = 4) {
+	while (cache.size > maxEntries) {
+		const oldest = cache.keys().next().value
+		if (!oldest) return
+		cache.delete(oldest)
+	}
+}
+
+function trimPullRequestCaches(cache: ClientZipWorkflowCache, maxEntries = 4) {
+	const keys = [...cache.pullRequestDiffs.keys()]
+	while (keys.length > maxEntries) {
+		const oldest = keys.shift()
+		if (!oldest) return
+		cache.pullRequestDiffs.delete(oldest)
+		cache.pullRequestBaseZips.delete(oldest)
+		cache.pullRequestZips.delete(oldest)
+	}
+	trimCache(cache.pullRequestBaseZips, maxEntries)
+	trimCache(cache.pullRequestZips, maxEntries)
+}
+
+async function assertBlobSha256(blob: Blob, expected: string | undefined) {
+	if (!expected) return
+	const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer())
+	const actual = Array.from(new Uint8Array(digest), (byte) =>
+		byte.toString(16).padStart(2, "0"),
+	).join("")
+	if (actual !== expected)
+		throw new Error("Downloaded ZIP checksum did not match.")
 }
 
 async function zipBlobFromResult(
 	context: ClientZipWorkflowContext,
 	result: ZipPayload,
 ) {
-	const responsePromise = fetch(result.fetchUrl)
+	const responsePromise = fetch(result.fetchUrl, {
+		credentials: "omit",
+		referrerPolicy: "strict-origin",
+	})
 	scheduleZipDownloadCleanup(context, result.downloadTicket)
 	try {
 		const response = await responsePromise

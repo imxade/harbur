@@ -1,5 +1,5 @@
 import { structuredPatch } from "diff"
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { repositoryFileText } from "../../lib/repositories"
 
 export function FileDiffView({
@@ -16,10 +16,16 @@ export function FileDiffView({
 	before?: { content: string | Uint8Array; encoding?: "utf8" | "base64" }
 	after?: { content: string | Uint8Array; encoding?: "utf8" | "base64" }
 }) {
-	const [hidden, setHidden] = useState(false)
-	const lines = missingDiffContent(diff.status, before, after)
-		? [{ kind: "same" as const, text: "File content not loaded." }]
-		: buildLineDiff(before, after)
+	const [hidden, setHidden] = useState(true)
+	const lines = useMemo(
+		() =>
+			hidden
+				? []
+				: missingDiffContent(diff.status, before, after)
+					? [{ kind: "same" as const, text: "File content not loaded." }]
+					: buildLineDiff(before, after),
+		[after, before, diff.status, hidden],
+	)
 	return (
 		<section className="rounded-lg border border-base-300 bg-base-100 overflow-hidden">
 			<header className="flex flex-col gap-2 border-b border-base-300 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -96,6 +102,12 @@ function buildLineDiff(
 	if (beforeText === null || afterText === null) {
 		return [{ kind: "same", text: "Binary file changed." }]
 	}
+	if (
+		beforeText.length + afterText.length > 2 * 1024 * 1024 ||
+		countLines(beforeText) + countLines(afterText) > 50_000
+	) {
+		return [{ kind: "same", text: "Text diff is too large to render safely." }]
+	}
 	return structuredPatch(
 		"before",
 		"after",
@@ -139,6 +151,14 @@ function buildLineDiff(
 		}
 		return lines
 	})
+}
+
+function countLines(value: string) {
+	let lines = 1
+	for (let index = 0; index < value.length; index += 1) {
+		if (value.charCodeAt(index) === 10) lines += 1
+	}
+	return lines
 }
 
 function missingDiffContent(
