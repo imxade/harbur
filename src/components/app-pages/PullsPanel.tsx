@@ -4,17 +4,16 @@ import { useState } from "react"
 import type { FormEvent } from "react"
 import { isAnonymousEmail } from "../../lib/auth"
 import { saveDownloadFile, type DownloadFile } from "../../lib/download-client"
-import type { FileDiff, PullRequestState } from "../../lib/pulls"
+import type { ClientPullRequestDiffSnapshot } from "../../lib/client-diff-cache"
+import type { PullRequestState } from "../../lib/pulls"
 import { displayOwnerName } from "../../lib/users"
 import { FileDiffView } from "./FileDiffView"
 import { UploadProgressStatus } from "./LoadingStates"
-import { ChatTimeline, EditableThreadTitle } from "./ThreadComponents"
-
-type RepositoryContentFile = {
-	path: string
-	content: string | Uint8Array
-	encoding?: "utf8" | "base64"
-}
+import {
+	ChatTimeline,
+	EditableThreadTitle,
+	type ChatTimelineMessage,
+} from "./ThreadComponents"
 
 type PullRequestComment = {
 	id: string
@@ -36,9 +35,6 @@ type PullRequestItem = {
 	createdAt: string
 	updatedAt?: string
 	editedAt?: string
-	files: RepositoryContentFile[]
-	baseFiles?: RepositoryContentFile[]
-	diff: FileDiff[]
 	comments: PullRequestComment[]
 }
 
@@ -48,6 +44,8 @@ type PendingPullRequestCreation = {
 	status: "creating" | "failed"
 	error?: string
 }
+
+type PendingComment = ChatTimelineMessage & { pullRequestNumber: number }
 
 type UploadProgressView = {
 	phase: "preparing" | "zipping" | "uploading"
@@ -66,9 +64,9 @@ type PullsPanelProps = {
 	}
 	maintainers: Array<{ email: string; permissions?: string[] }>
 	accessGrants: Array<{ email: string }>
-	baseFiles: RepositoryContentFile[]
 	users: Record<string, { ownerName: string }>
 	pullRequests: PullRequestItem[]
+	pullRequestDiffs: Record<string, ClientPullRequestDiffSnapshot>
 	itemNumber?: number
 	newPullRequest?: boolean
 	onCreatePullRequest: (input: {
@@ -81,7 +79,7 @@ type PullsPanelProps = {
 		repositoryId: string
 		pullRequestNumber: number
 		body: string
-	}) => Promise<void>
+	}) => Promise<ChatTimelineMessage>
 	onEditMessage: (input: {
 		repositoryId: string
 		pullRequestNumber: number
@@ -95,7 +93,7 @@ type PullsPanelProps = {
 	}) => Promise<void>
 	onReview: (repositoryId: string, pullRequestNumber: number) => Promise<void>
 	onClose: (repositoryId: string, pullRequestNumber: number) => Promise<void>
-	onDownloadMerged: (
+	onDownloadArchive: (
 		repositoryId: string,
 		pullRequestNumber: number,
 	) => Promise<DownloadFile>
@@ -112,8 +110,8 @@ export function PullsPanel({
 	policy,
 	maintainers,
 	accessGrants,
-	baseFiles,
 	pullRequests,
+	pullRequestDiffs,
 	users,
 	itemNumber,
 	newPullRequest,
@@ -123,7 +121,7 @@ export function PullsPanel({
 	onEditTitle,
 	onReview,
 	onClose,
-	onDownloadMerged,
+	onDownloadArchive,
 	onMerge,
 	onSignIn,
 	uploadProgress,
@@ -132,7 +130,7 @@ export function PullsPanel({
 	const [body, setBody] = useState("")
 	const [files, setFiles] = useState<File[]>([])
 	const [comment, setComment] = useState("")
-	const [commentBusy, setCommentBusy] = useState(false)
+	const [pendingComments, setPendingComments] = useState<PendingComment[]>([])
 	const [actionBusy, setActionBusy] = useState(false)
 	const [downloadBusy, setDownloadBusy] = useState(false)
 	const [fileInputKey, setFileInputKey] = useState(0)
@@ -148,6 +146,7 @@ export function PullsPanel({
 		stateFilter === "open" ? pr.state === "open" : pr.state !== "open",
 	)
 	const selected = pullRequests.find((pr) => pr.number === itemNumber)
+	const selectedDiff = selected ? pullRequestDiffs[selected.id] : undefined
 	const ownerForEmail = (email: string) => displayOwnerName(email, users)
 	const maintainerEmails = maintainers.map((maintainer) =>
 		maintainer.email.toLowerCase(),
@@ -228,31 +227,62 @@ export function PullsPanel({
 			return
 		}
 		if (!selected) return
-		setCommentBusy(true)
+		const body = comment.trim()
+		if (!body) return
+		const pendingId = `pending:${crypto.randomUUID()}`
+		const pullRequestNumber = selected.number
+		setPendingComments((current) => [
+			...current,
+			{
+				id: pendingId,
+				pullRequestNumber,
+				authorEmail: actorEmail,
+				body,
+				createdAt: new Date().toISOString(),
+				persistenceStatus: "sending",
+			},
+		])
+		setComment("")
 		setError(null)
 		try {
-			await onComment({
+			const stored = await onComment({
 				repositoryId,
-				pullRequestNumber: selected.number,
-				body: comment,
+				pullRequestNumber,
+				body,
 			})
-			setComment("")
+			setPendingComments((current) =>
+				current.map((item) =>
+					item.id === pendingId
+						? { ...stored, pullRequestNumber, persistenceStatus: "stored" }
+						: item,
+				),
+			)
+			window.setTimeout(() => {
+				setPendingComments((current) =>
+					current.filter((item) => item.id !== stored.id),
+				)
+			}, 1800)
 		} catch (cause) {
+			setPendingComments((current) =>
+				current.map((item) =>
+					item.id === pendingId
+						? { ...item, persistenceStatus: "failed" }
+						: item,
+				),
+			)
 			setError(cause instanceof Error ? cause.message : "Comment failed.")
-		} finally {
-			setCommentBusy(false)
 		}
 	}
-	async function downloadMergedZip() {
+	async function downloadArchiveZip() {
 		if (!selected) return
 		setDownloadBusy(true)
 		setError(null)
 		try {
-			const download = await onDownloadMerged(repositoryId, selected.number)
+			const download = await onDownloadArchive(repositoryId, selected.number)
 			saveDownloadFile(download)
 		} catch (cause) {
 			setError(
-				cause instanceof Error ? cause.message : "Merged ZIP download failed.",
+				cause instanceof Error ? cause.message : "PR ZIP download failed.",
 			)
 			setDownloadBusy(false)
 		} finally {
@@ -294,7 +324,7 @@ export function PullsPanel({
 	}
 
 	if (selected) {
-		const timeline = [
+		const timeline = mergeTimelineMessages([
 			{
 				id: selected.id,
 				authorEmail: selected.authorEmail,
@@ -304,7 +334,12 @@ export function PullsPanel({
 				editedAt: selected.editedAt,
 			},
 			...selected.comments,
-		]
+			...pendingComments.filter(
+				(pending) => pending.pullRequestNumber === selected.number,
+			),
+		])
+		const archiveLabel =
+			selected.state === "merged" ? "Pre-merge ZIP" : "Proposal ZIP"
 		return (
 			<section className="min-w-0">
 				<article className="min-w-0 space-y-4">
@@ -358,9 +393,8 @@ export function PullsPanel({
 								<button
 									type="submit"
 									className="btn btn-primary btn-sm w-full sm:w-auto"
-									disabled={commentBusy}
 								>
-									{commentBusy ? "Commenting" : "Comment"}
+									Comment
 								</button>
 							</form>
 						</div>
@@ -391,13 +425,17 @@ export function PullsPanel({
 										type="button"
 										className="btn btn-outline btn-sm"
 										disabled={
-											downloadBusy || actionBusy || selected.state !== "open"
+											downloadBusy || actionBusy || selected.state === "closed"
 										}
-										title="Download merged ZIP for testing"
-										onClick={() => void downloadMergedZip()}
+										title={
+											selected.state === "merged"
+												? "Download the repository ZIP from immediately before this merge"
+												: "Download the complete proposed repository ZIP for testing"
+										}
+										onClick={() => void downloadArchiveZip()}
 									>
 										<Download size={16} />
-										{downloadBusy ? "Building ZIP" : "Merged ZIP"}
+										{downloadBusy ? "Starting" : archiveLabel}
 									</button>
 									<button
 										type="button"
@@ -458,17 +496,17 @@ export function PullsPanel({
 								</div>
 							</div>
 							<div className="space-y-3">
-								{selected.diff.map((fileDiff) => (
+								{selectedDiff?.diff.map((fileDiff) => (
 									<FileDiffView
 										key={`${fileDiff.path}:${fileDiff.status}`}
 										diff={fileDiff}
-										before={findFileContent(
-											selected.baseFiles ?? baseFiles,
-											fileDiff.path,
-										)}
-										after={findFileContent(selected.files, fileDiff.path)}
+										before={fileDiff.before}
+										after={fileDiff.after}
 									/>
 								))}
+								{!selectedDiff ? (
+									<div className="alert">Calculating diff in this browser…</div>
+								) : null}
 							</div>
 						</div>
 					</div>
@@ -510,8 +548,7 @@ export function PullsPanel({
 							#{pr.number} {pr.title}
 						</div>
 						<div className="break-words text-sm text-base-content/60">
-							{pr.state} by {ownerForEmail(pr.authorEmail)}; {pr.diff.length}{" "}
-							changed files
+							{pr.state} by {ownerForEmail(pr.authorEmail)}
 						</div>
 					</Link>
 				))}
@@ -523,6 +560,15 @@ export function PullsPanel({
 			</div>
 			{pullRequestForm}
 		</section>
+	)
+}
+
+function mergeTimelineMessages(messages: ChatTimelineMessage[]) {
+	const byId = new Map(messages.map((message) => [message.id, message]))
+	return [...byId.values()].sort(
+		(left, right) =>
+			left.createdAt.localeCompare(right.createdAt) ||
+			left.id.localeCompare(right.id),
 	)
 }
 
@@ -628,8 +674,4 @@ function PullRequestForm({
 			</div>
 		</form>
 	)
-}
-
-function findFileContent(files: RepositoryContentFile[], path: string) {
-	return files.find((file) => file.path === path)
 }

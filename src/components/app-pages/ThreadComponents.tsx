@@ -84,13 +84,14 @@ function escapeRegExp(value: string) {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
-type ChatTimelineMessage = {
+export type ChatTimelineMessage = {
 	id: string
 	authorEmail: string
 	body: string
 	createdAt: string
 	updatedAt?: string
 	editedAt?: string
+	persistenceStatus?: "sending" | "stored" | "failed"
 }
 
 export function ChatTimeline({
@@ -113,6 +114,7 @@ export function ChatTimeline({
 	const [busy, setBusy] = useState(false)
 	const canEditMessage = (message: ChatTimelineMessage) =>
 		!isAnonymousEmail(actorEmail) &&
+		!message.persistenceStatus &&
 		message.authorEmail.toLowerCase() === actorEmail.toLowerCase()
 
 	async function submitMessageEdit(event: FormEvent<HTMLFormElement>) {
@@ -192,18 +194,36 @@ export function ChatTimeline({
 							/>
 						)}
 					</div>
-					{canEditMessage(message) ? (
-						<div className="chat-footer mt-1">
-							<button
-								type="button"
-								className="btn btn-ghost btn-xs"
-								onClick={() => {
-									setEditingMessageId(message.id)
-									setEditingBody(message.body)
-								}}
-							>
-								<Pencil size={12} /> Edit
-							</button>
+					{message.persistenceStatus || canEditMessage(message) ? (
+						<div className="chat-footer mt-1 flex items-center gap-2">
+							{message.persistenceStatus ? (
+								<span
+									className={
+										message.persistenceStatus === "failed"
+											? "text-error"
+											: "text-base-content/60"
+									}
+									aria-live="polite"
+								>
+									{message.persistenceStatus === "sending"
+										? "Sending…"
+										: message.persistenceStatus === "stored"
+											? "Stored · visible to others"
+											: "Not stored · visible only to you"}
+								</span>
+							) : null}
+							{canEditMessage(message) ? (
+								<button
+									type="button"
+									className="btn btn-ghost btn-xs"
+									onClick={() => {
+										setEditingMessageId(message.id)
+										setEditingBody(message.body)
+									}}
+								>
+									<Pencil size={12} /> Edit
+								</button>
+							) : null}
 						</div>
 					) : null}
 				</div>

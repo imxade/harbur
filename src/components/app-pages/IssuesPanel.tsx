@@ -3,7 +3,13 @@ import { useState } from "react"
 import type { FormEvent } from "react"
 import { isAnonymousEmail } from "../../lib/auth"
 import { displayOwnerName } from "../../lib/users"
-import { ChatTimeline, EditableThreadTitle } from "./ThreadComponents"
+import {
+	ChatTimeline,
+	EditableThreadTitle,
+	type ChatTimelineMessage,
+} from "./ThreadComponents"
+
+type PendingComment = ChatTimelineMessage & { issueNumber: number }
 
 export function IssuesPanel({
 	actorEmail,
@@ -65,7 +71,7 @@ export function IssuesPanel({
 		repositoryId: string
 		issueNumber: number
 		body: string
-	}) => Promise<void>
+	}) => Promise<ChatTimelineMessage>
 	onEditMessage: (input: {
 		repositoryId: string
 		issueNumber: number
@@ -89,7 +95,7 @@ export function IssuesPanel({
 	const [labels, setLabels] = useState<string[]>([])
 	const [comment, setComment] = useState("")
 	const [createBusy, setCreateBusy] = useState(false)
-	const [commentBusy, setCommentBusy] = useState(false)
+	const [pendingComments, setPendingComments] = useState<PendingComment[]>([])
 	const [transitionBusy, setTransitionBusy] = useState(false)
 	const [error, setError] = useState<string | null>(null)
 	const [stateFilter, setStateFilter] = useState<"open" | "closed">("open")
@@ -155,24 +161,55 @@ export function IssuesPanel({
 			return
 		}
 		if (!selected) return
-		setCommentBusy(true)
+		const body = comment.trim()
+		if (!body) return
+		const pendingId = `pending:${crypto.randomUUID()}`
+		const issueNumber = selected.number
+		setPendingComments((current) => [
+			...current,
+			{
+				id: pendingId,
+				issueNumber,
+				authorEmail: actorEmail,
+				body,
+				createdAt: new Date().toISOString(),
+				persistenceStatus: "sending",
+			},
+		])
+		setComment("")
 		setError(null)
 		try {
-			await onComment({
+			const stored = await onComment({
 				repositoryId: repository.id,
-				issueNumber: selected.number,
-				body: comment,
+				issueNumber,
+				body,
 			})
-			setComment("")
+			setPendingComments((current) =>
+				current.map((item) =>
+					item.id === pendingId
+						? { ...stored, issueNumber, persistenceStatus: "stored" }
+						: item,
+				),
+			)
+			window.setTimeout(() => {
+				setPendingComments((current) =>
+					current.filter((item) => item.id !== stored.id),
+				)
+			}, 1800)
 		} catch (cause) {
+			setPendingComments((current) =>
+				current.map((item) =>
+					item.id === pendingId
+						? { ...item, persistenceStatus: "failed" }
+						: item,
+				),
+			)
 			setError(cause instanceof Error ? cause.message : "Comment failed.")
-		} finally {
-			setCommentBusy(false)
 		}
 	}
 	if (selected) {
 		const canChangeSelectedState = canTransitionIssue(selected.authorEmail)
-		const timeline = [
+		const timeline = mergeTimelineMessages([
 			{
 				id: selected.id,
 				authorEmail: selected.authorEmail,
@@ -182,7 +219,10 @@ export function IssuesPanel({
 				editedAt: selected.editedAt,
 			},
 			...selected.comments,
-		]
+			...pendingComments.filter(
+				(pending) => pending.issueNumber === selected.number,
+			),
+		])
 		return (
 			<section className="min-w-0">
 				<article className="min-w-0 space-y-4">
@@ -280,9 +320,8 @@ export function IssuesPanel({
 								<button
 									type="submit"
 									className="btn btn-primary btn-sm w-full sm:w-auto"
-									disabled={commentBusy}
 								>
-									{commentBusy ? "Commenting" : "Comment"}
+									Comment
 								</button>
 							</form>
 						</div>
@@ -398,5 +437,14 @@ export function IssuesPanel({
 				</div>
 			</form>
 		</section>
+	)
+}
+
+function mergeTimelineMessages(messages: ChatTimelineMessage[]) {
+	const byId = new Map(messages.map((message) => [message.id, message]))
+	return [...byId.values()].sort(
+		(left, right) =>
+			left.createdAt.localeCompare(right.createdAt) ||
+			left.id.localeCompare(right.id),
 	)
 }

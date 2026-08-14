@@ -98,10 +98,11 @@ function repositoryFileBytesForUpload(file: UploadedRepositoryFile) {
 function assertNoDuplicatePaths(files: Array<Pick<RepositoryFile, "path">>) {
 	const seen = new Set<string>()
 	for (const file of files) {
-		if (seen.has(file.path)) {
-			throw new Error(`Duplicate repository path: ${file.path}`)
+		const collisionKey = file.path.normalize("NFC").toLowerCase()
+		if (seen.has(collisionKey)) {
+			throw new Error(`Duplicate or colliding repository path: ${file.path}`)
 		}
-		seen.add(file.path)
+		seen.add(collisionKey)
 	}
 }
 

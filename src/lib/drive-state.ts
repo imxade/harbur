@@ -20,7 +20,6 @@ import {
 	deleteGoogleDrivePermission,
 	deleteGoogleDriveAppDataDocument,
 	ensureGoogleDriveResultsFolder,
-	downloadGoogleDriveFile,
 	getGoogleDriveFileMetadata,
 	getGoogleDriveStorageQuota,
 	googleDrivePublicFileMediaUrl,
@@ -43,17 +42,12 @@ import {
 	type IssueRecord,
 	type IssueState,
 } from "./issues"
-import {
-	assertCanMergePullRequest,
-	type FileDiff,
-	type PullRequestRecord,
-} from "./pulls"
+import { assertCanMergePullRequest, type PullRequestRecord } from "./pulls"
 import { assertRepositoryName, createRepositoryManifest } from "./repositories"
 import {
 	prepareRepositoryUploadMetadata,
 	type UploadedRepositoryFileMetadata,
 } from "./repositories/uploads"
-import { assertRepositoryContentPath } from "./security/paths"
 import { createBootstrapConfig, createDefaultSettings } from "./settings"
 import type {
 	AppSettings,
@@ -77,9 +71,6 @@ type ThreadComment = {
 }
 
 type AppPullRequest = PullRequestRecord & {
-	files: RepositoryFile[]
-	baseFiles: RepositoryFile[]
-	diff: FileDiff[]
 	comments: ThreadComment[]
 }
 
@@ -109,7 +100,6 @@ export type AppState = {
 	loadedRepositoryIds?: string[]
 	loadedRepositoryFileIds?: string[]
 	loadedRepositoryReadmeIds?: string[]
-	loadedPullRequestFileIds?: string[]
 	loadedThreadIds?: string[]
 	config: ReturnType<typeof createBootstrapConfig>
 	settings: ReturnType<typeof createDefaultSettings>
@@ -168,10 +158,11 @@ type StoredRepositoryFile = Omit<RepositoryFile, "content" | "encoding"> & {
 }
 
 type StoredAppPullRequest = PullRequestRecord & {
-	files: StoredRepositoryFile[]
-	baseFiles?: StoredRepositoryFile[]
-	diff: FileDiff[]
 	comments: ThreadComment[]
+	// Read-only compatibility for v1 records. These fields are stripped on save.
+	files?: StoredRepositoryFile[]
+	baseFiles?: StoredRepositoryFile[]
+	diff?: unknown[]
 }
 
 type StoredRepositoryState = {
@@ -203,6 +194,7 @@ type MaterializedRepositoryStateInput = Omit<
 	notifications: Record<string, AppNotification[]>
 	storageVersion?: string
 	loadedThreadIds?: string[]
+	legacyPullRequestThreadIds?: string[]
 }
 
 type StoredRepositoryAppendRecord = {
@@ -231,6 +223,8 @@ type StoredRepositoryAppendRecord = {
 	messageId?: string
 	issueState?: IssueState
 	reviewedBy?: string
+	reviewedBaseRepositoryZipFileId?: string
+	reviewedProposalZipFileId?: string
 	pullRequestZipFileId?: string
 	activity: ActivityRecord[]
 	notifications: Record<string, AppNotification[]>
@@ -325,7 +319,6 @@ export async function loadOrCreateAppState(
 					loadedRepositoryIds: [],
 					loadedRepositoryFileIds: [],
 					loadedRepositoryReadmeIds: [],
-					loadedPullRequestFileIds: [],
 					loadedThreadIds: [],
 				}
 				const requestedRepositoryIds =
@@ -385,7 +378,6 @@ export async function loadOrCreateAppState(
 		loadedRepositoryIds: [],
 		loadedRepositoryFileIds: [],
 		loadedRepositoryReadmeIds: [],
-		loadedPullRequestFileIds: [],
 		loadedThreadIds: [],
 	}
 	const registeredState = ensureUserProfile(
@@ -591,14 +583,6 @@ async function loadRepositoryDetailsForState(
 				(repositoryId) => !requestedIds.has(repositoryId),
 			),
 		],
-		loadedPullRequestFileIds: [
-			...(state.loadedPullRequestFileIds ?? []).filter(
-				(pullRequestId) =>
-					![...requestedIds].some((repositoryId) =>
-						pullRequestId.startsWith(`${repositoryId}:pull:`),
-					),
-			),
-		],
 		loadedThreadIds: [
 			...(state.loadedThreadIds ?? []).filter(
 				(threadId) =>
@@ -627,7 +611,6 @@ async function loadRepositoryDetailsForState(
 			nextState,
 			repository.id,
 			repositoryState,
-			false,
 			false,
 		)
 	}
@@ -714,6 +697,15 @@ async function materializeRepositoryStateDocument({
 		try {
 			const parsed = JSON.parse(existing.raw) as Partial<StoredRepositoryState>
 			if (parsed.schema === APP_SCHEMA.repositoryState) {
+				const migrateLegacyPullRequests =
+					(parsed.pullRequests ?? []).some(hasLegacyPullRequestPayload) ||
+					appendRecords.some(
+						(record) =>
+							Boolean(record.pullRequest) &&
+							hasLegacyPullRequestPayload(
+								record.pullRequest as StoredAppPullRequest,
+							),
+					)
 				let materializedState = await timed(
 					"drive.repository.materialize",
 					async () => {
@@ -783,6 +775,9 @@ async function materializeRepositoryStateDocument({
 					repository,
 					state: materializedState,
 					appendRecords,
+					migrateLegacyPullRequests:
+						migrateLegacyPullRequests ||
+						Boolean(materializedState.legacyPullRequestThreadIds?.length),
 				})
 				const finalState = await timed(
 					"drive.repository.prune",
@@ -851,10 +846,17 @@ async function loadRepositoryThreadDocument(
 		throw new Error(`Repository thread is unreadable: ${threadId}`)
 	}
 	if (parsed.kind === "issue") {
-		return parsed.thread as IssueRecord
+		return {
+			thread: parsed.thread as IssueRecord,
+			legacyPullRequestPayload: false,
+		}
 	}
 	if (parsed.kind === "pull") {
-		return storedPullRequestForRuntime(parsed.thread as StoredAppPullRequest)
+		const storedPullRequest = parsed.thread as StoredAppPullRequest
+		return {
+			thread: storedPullRequestForRuntime(storedPullRequest),
+			legacyPullRequestPayload: hasLegacyPullRequestPayload(storedPullRequest),
+		}
 	}
 	throw new Error(`Repository thread is unreadable: ${threadId}`)
 }
@@ -979,19 +981,41 @@ async function hydrateRepositoryThreadDetails({
 			await loadRepositoryThreadDocument(accessToken, repository, threadId),
 		]),
 	)
-	const loadedThreads = new Map(
+	const loadedDocuments = new Map(
 		loadedEntries.filter(
-			(entry): entry is [string, IssueRecord | AppPullRequest] =>
-				Boolean(entry[1]),
+			(
+				entry,
+			): entry is [
+				string,
+				{
+					thread: IssueRecord | AppPullRequest
+					legacyPullRequestPayload: boolean
+				},
+			] => Boolean(entry[1]),
 		),
+	)
+	const loadedThreads = new Map(
+		[...loadedDocuments].map(([threadId, document]) => [
+			threadId,
+			document.thread,
+		]),
 	)
 	const loadedThreadIds = [
 		...new Set([...(state.loadedThreadIds ?? []), ...selectedIds]),
+	]
+	const legacyPullRequestThreadIds = [
+		...new Set([
+			...(state.legacyPullRequestThreadIds ?? []),
+			...[...loadedDocuments]
+				.filter(([, document]) => document.legacyPullRequestPayload)
+				.map(([threadId]) => threadId),
+		]),
 	]
 	if (!loadedThreads.size) {
 		return {
 			...state,
 			loadedThreadIds,
+			legacyPullRequestThreadIds,
 		}
 	}
 
@@ -1008,6 +1032,7 @@ async function hydrateRepositoryThreadDetails({
 				: pullRequest
 		}),
 		loadedThreadIds,
+		legacyPullRequestThreadIds,
 	}
 }
 
@@ -1067,20 +1092,6 @@ function repositoryReadmeFilesForStorage(
 	return [...(readme ? [repositoryFileForSidecar(readme)] : []), ...assets]
 }
 
-function pullRequestBaseFilesForSidecar(files: RepositoryFile[]) {
-	const baseFiles: RepositoryFile[] = []
-	let bytes = 0
-	for (const file of files) {
-		if (baseFiles.length >= APP_STORAGE.pullRequestBaseSidecarMaxFiles) break
-		if (bytes + file.size > APP_STORAGE.pullRequestBaseSidecarMaxBytes) {
-			continue
-		}
-		bytes += file.size
-		baseFiles.push(file)
-	}
-	return baseFiles
-}
-
 function repositoryFileForSidecar(file: RepositoryFile): StoredRepositoryFile {
 	return {
 		path: file.path,
@@ -1108,13 +1119,25 @@ function storedPullRequestsForRuntime(
 	return pullRequests.map(storedPullRequestForRuntime)
 }
 
+function hasLegacyPullRequestPayload(pullRequest: StoredAppPullRequest) {
+	return (
+		"files" in pullRequest ||
+		"baseFiles" in pullRequest ||
+		"diff" in pullRequest
+	)
+}
+
 function storedPullRequestForRuntime(
 	pullRequest: StoredAppPullRequest,
 ): AppPullRequest {
+	const {
+		files: _files,
+		baseFiles: _baseFiles,
+		diff: _diff,
+		...record
+	} = pullRequest
 	return {
-		...pullRequest,
-		files: [],
-		baseFiles: storedRepositoryFilesWithContent(pullRequest.baseFiles),
+		...record,
 	}
 }
 
@@ -1373,6 +1396,9 @@ function materializeRepositoryState({
 				pullRequests.set(record.targetId, {
 					...pullRequest,
 					reviewedBy: record.reviewedBy,
+					reviewedBaseRepositoryZipFileId:
+						record.reviewedBaseRepositoryZipFileId,
+					reviewedProposalZipFileId: record.reviewedProposalZipFileId,
 					updatedAt: maxTimestamp(pullRequest.updatedAt, record.createdAt),
 				})
 			}
@@ -1402,7 +1428,6 @@ function materializeRepositoryState({
 		...base,
 		issues: assignThreadNumbers([...issues.values()]),
 		pullRequests: assignThreadNumbers([...pullRequests.values()]),
-		loadedPullRequestFileIds: [] as string[],
 		loadedThreadIds: base.loadedThreadIds ?? [],
 		pullRequestZipFileIds: Object.fromEntries(
 			Object.entries(pullRequestZipFileIds).filter(([pullRequestId]) =>
@@ -1449,7 +1474,6 @@ function materializeAppStateWithAppendRecord(
 		repositoryId,
 		repositoryState,
 		Boolean(state.loadedRepositoryFileIds?.includes(repositoryId)),
-		false,
 	)
 }
 
@@ -1458,7 +1482,6 @@ function mergeMaterializedRepositoryState(
 	repositoryId: string,
 	repositoryState: ReturnType<typeof materializeRepositoryState>,
 	repositoryFilesLoaded = true,
-	pullRequestFilesLoaded = repositoryFilesLoaded,
 ): AppState {
 	return {
 		...state,
@@ -1520,14 +1543,6 @@ function mergeMaterializedRepositoryState(
 		loadedRepositoryReadmeIds: [
 			...new Set([...(state.loadedRepositoryReadmeIds ?? []), repositoryId]),
 		],
-		loadedPullRequestFileIds: pullRequestFilesLoaded
-			? [
-					...new Set([
-						...(state.loadedPullRequestFileIds ?? []),
-						...repositoryState.loadedPullRequestFileIds,
-					]),
-				]
-			: state.loadedPullRequestFileIds,
 		loadedThreadIds: [
 			...new Set([
 				...(state.loadedThreadIds ?? []),
@@ -1554,13 +1569,16 @@ async function compactRepositoryAppendRecords({
 	repository,
 	state,
 	appendRecords,
+	migrateLegacyPullRequests = false,
 }: {
 	accessToken: string
 	repository: RepositoryManifest
 	state: ReturnType<typeof materializeRepositoryState>
 	appendRecords: LoadedRepositoryAppendRecord[]
+	migrateLegacyPullRequests?: boolean
 }) {
 	const shouldCompact =
+		migrateLegacyPullRequests ||
 		appendRecords.length >= APP_STORAGE.repositoryAppendCompactionThreshold
 	if (!shouldCompact) {
 		return state
@@ -1572,6 +1590,11 @@ async function compactRepositoryAppendRecords({
 				.map(appendRecordThreadId)
 				.filter((threadId): threadId is string => Boolean(threadId)),
 		)
+		if (migrateLegacyPullRequests) {
+			for (const pullRequest of state.pullRequests) {
+				affectedThreadIds.add(pullRequest.id)
+			}
+		}
 		const detailedBaseState = await hydrateRepositoryThreadDetails({
 			accessToken,
 			repository,
@@ -1608,7 +1631,9 @@ async function compactRepositoryAppendRecords({
 					pullRequestZipFileIds: detailedState.pullRequestZipFileIds,
 					activity: detailedState.activity,
 					storageVersion: detailedState.storageVersion,
-					reason: "append.compact",
+					reason: migrateLegacyPullRequests
+						? "pull.storage.migrate"
+						: "append.compact",
 				}),
 			{ repositoryId: repository.id, appendRecords: appendRecords.length },
 		)
@@ -1920,10 +1945,15 @@ function pullRequestForRepositoryIndex(
 function pullRequestForStorage(
 	pullRequest: AppPullRequest,
 ): StoredAppPullRequest {
+	const {
+		files: _files,
+		baseFiles: _baseFiles,
+		diff: _diff,
+		...record
+	} = pullRequest as AppPullRequest &
+		Partial<Pick<StoredAppPullRequest, "files" | "baseFiles" | "diff">>
 	return {
-		...pullRequest,
-		files: repositoryFileMetadata(pullRequest.files),
-		baseFiles: pullRequest.baseFiles.map(repositoryFileForSidecar),
+		...record,
 	}
 }
 
@@ -2182,6 +2212,9 @@ export async function beginRepositoryArchiveUpload({
 	zipBytes: number
 	origin: string
 }) {
+	if (zipBytes > state.settings.uploadLimits.maxRepoUploadBytes) {
+		throw new Error("Repository ZIP exceeds the configured upload limit.")
+	}
 	assertRepositoryName(name)
 	if (
 		state.repositories.some(
@@ -2211,6 +2244,7 @@ export async function beginPullRequestArchiveUpload({
 	baseRepositoryZipFileId,
 	zipBytes,
 	origin,
+	actorEmail,
 }: {
 	accessToken: string
 	state: AppState
@@ -2218,7 +2252,19 @@ export async function beginPullRequestArchiveUpload({
 	baseRepositoryZipFileId: string
 	zipBytes: number
 	origin: string
+	actorEmail: string
 }) {
+	if (zipBytes > state.settings.uploadLimits.maxPrUploadBytes) {
+		throw new Error("Pull request ZIP exceeds the configured upload limit.")
+	}
+	const openByActor = openPullRequestCountForActor(
+		state,
+		repository.id,
+		actorEmail,
+	)
+	if (openByActor >= APP_UPLOAD.maxOpenPullRequestsPerActor) {
+		throw new Error("Too many open pull requests for this repository.")
+	}
 	if (!repository.policy.prsEnabled)
 		throw new Error("Pull requests are disabled.")
 	if (state.repositoryZipFileIds[repository.id] !== baseRepositoryZipFileId) {
@@ -2234,30 +2280,16 @@ export async function beginPullRequestArchiveUpload({
 	})
 }
 
-export async function beginMergedRepositoryArchiveUpload({
-	accessToken,
-	state,
-	repository,
-	baseRepositoryZipFileId,
-	zipBytes,
-	origin,
-}: {
-	accessToken: string
-	state: AppState
-	repository: RepositoryManifest
-	baseRepositoryZipFileId: string
-	zipBytes: number
-	origin: string
-}) {
-	return await beginRepositoryZipReplacementUpload({
-		accessToken,
-		state,
-		repository,
-		baseRepositoryZipFileId,
-		label: "merge",
-		zipBytes,
-		origin,
-	})
+function openPullRequestCountForActor(
+	state: AppState,
+	repositoryId: string,
+	actorEmail: string,
+) {
+	return (state.pullRequests[repositoryId] ?? []).filter(
+		(pullRequest) =>
+			pullRequest.state === "open" &&
+			pullRequest.authorEmail.toLowerCase() === actorEmail.toLowerCase(),
+	).length
 }
 
 export async function beginGitHubMirrorSyncArchiveUpload({
@@ -2346,6 +2378,7 @@ async function assertStagedZipUpload({
 	const zipMetadata = await getGoogleDriveFileMetadata(accessToken, fileId)
 	if (
 		zipMetadata.name !== name ||
+		zipMetadata.mimeType !== "application/zip" ||
 		zipMetadata.size !== String(bytes) ||
 		!zipMetadata.parents?.includes(folderId)
 	) {
@@ -2367,29 +2400,6 @@ function metadataFilesForRuntime(
 				encoding: file.encoding ?? "utf8",
 			}) satisfies RepositoryFile,
 	)
-}
-
-function assertPullRequestDiffMetadata(
-	diff: FileDiff[],
-	files: RepositoryFile[],
-) {
-	if (!diff.length) throw new Error("Pull request has no changes.")
-	const filesByPath = new Map(files.map((file) => [file.path, file]))
-	for (const fileDiff of diff) {
-		assertRepositoryContentPath(fileDiff.path)
-		if (fileDiff.status === "unchanged") {
-			throw new Error("Pull request diff cannot include unchanged files.")
-		}
-		const file = filesByPath.get(fileDiff.path)
-		if (fileDiff.status === "deleted") {
-			if (file) throw new Error(`Deleted file has upload data: ${file.path}`)
-			continue
-		}
-		if (!file) throw new Error(`Changed file is missing: ${fileDiff.path}`)
-		if (fileDiff.afterHash && fileDiff.afterHash !== file.contentHash) {
-			throw new Error(`Changed file hash does not match: ${file.path}`)
-		}
-	}
 }
 
 export async function completeRepositoryArchiveUpload({
@@ -2471,9 +2481,6 @@ export async function completePullRequestArchiveUpload({
 	uploadZipFileId,
 	uploadZipBytes,
 	baseRepositoryZipFileId,
-	files,
-	baseFiles,
-	diff,
 }: {
 	accessToken: string
 	state: AppState
@@ -2485,36 +2492,35 @@ export async function completePullRequestArchiveUpload({
 	uploadZipFileId: string
 	uploadZipBytes: number
 	baseRepositoryZipFileId: string
-	files: UploadedRepositoryFileMetadata[]
-	baseFiles: UploadedRepositoryFileMetadata[]
-	diff: FileDiff[]
 }) {
 	const repository = findRepository(state, repositoryId)
 	try {
 		if (state.repositoryZipFileIds[repositoryId] !== baseRepositoryZipFileId) {
 			throw new Error("Repository changed before the PR was committed.")
 		}
-		await assertStagedZipUpload({
+		const stagedZip = await assertStagedZipUpload({
 			accessToken,
 			fileId: uploadZipFileId,
 			folderId: uploadFolderId,
 			name: APP_STORAGE.stagedUploadZipFileName,
 			bytes: uploadZipBytes,
 		})
+		if (!stagedZip.sha256Checksum) {
+			throw new Error("Google Drive did not provide a proposal ZIP checksum.")
+		}
 		if (!repository.policy.prsEnabled)
 			throw new Error("Pull requests are disabled.")
+		const openByActor = openPullRequestCountForActor(
+			state,
+			repository.id,
+			actorEmail,
+		)
+		if (openByActor >= APP_UPLOAD.maxOpenPullRequestsPerActor) {
+			throw new Error("Too many open pull requests for this repository.")
+		}
 		if (!title.trim() || !body.trim()) {
 			throw new Error("Pull request title and body are required.")
 		}
-		const changedFiles = files.length
-			? metadataFilesForRuntime(files, state.settings, "pull-request")
-			: []
-		assertPullRequestDiffMetadata(diff, changedFiles)
-		const baseSidecars = baseFiles.length
-			? pullRequestBaseFilesForSidecar(
-					metadataFilesForRuntime(baseFiles, state.settings, "pull-request"),
-				)
-			: []
 		const recordId = `${APP_STORAGE.pullRequestFolderPrefix}-${crypto.randomUUID()}`
 		const prFolder = await createGoogleDriveFolder({
 			accessToken,
@@ -2537,11 +2543,10 @@ export async function completePullRequestArchiveUpload({
 				title: title.trim(),
 				body: body.trim(),
 				state: "open",
+				baseRepositoryZipFileId,
+				proposalZipSha256: zipFile.sha256Checksum ?? stagedZip.sha256Checksum,
 				createdAt: now,
 				updatedAt: now,
-				files: changedFiles,
-				baseFiles: baseSidecars,
-				diff,
 				comments: [],
 			}
 			const notifications = addMentionNotifications({
@@ -2620,15 +2625,16 @@ async function snapshotForRepositoryZip({
 	source: RepositorySnapshot["source"]
 	pullRequestNumber?: number
 }): Promise<RepositorySnapshot> {
-	const bytes = await downloadGoogleDriveFile(accessToken, zipFileId)
-	const digest = await crypto.subtle.digest("SHA-256", bytes)
-	const sha256 = Array.from(new Uint8Array(digest), (byte) =>
-		byte.toString(16).padStart(2, "0"),
-	).join("")
+	const metadata = await getGoogleDriveFileMetadata(accessToken, zipFileId)
+	const archiveBytes = Number(metadata.size)
+	const sha256 = metadata.sha256Checksum
+	if (!Number.isSafeInteger(archiveBytes) || archiveBytes <= 0 || !sha256) {
+		throw new Error("Google Drive ZIP checksum metadata is unavailable.")
+	}
 	return {
 		revision: sha256,
 		sha256,
-		archiveBytes: bytes.byteLength,
+		archiveBytes,
 		driveFileId: zipFileId,
 		createdAt: new Date().toISOString(),
 		source,
@@ -2946,12 +2952,6 @@ export async function updateRepositoryAccessInDriveState({
 		loadedRepositoryReadmeIds: (state.loadedRepositoryReadmeIds ?? []).map(
 			(id) => (id === repositoryId ? nextId : id),
 		),
-		loadedPullRequestFileIds: (state.loadedPullRequestFileIds ?? []).map(
-			(id) =>
-				id.startsWith(`${repositoryId}:pull:`)
-					? id.replace(`${repositoryId}:pull:`, `${nextId}:pull:`)
-					: id,
-		),
 		loadedThreadIds: state.loadedThreadIds,
 		watches: Object.fromEntries(
 			Object.entries(state.watches).map(([email, repositoryIds]) => [
@@ -3175,9 +3175,6 @@ export async function updateUserNameInDriveState({
 		loadedRepositoryReadmeIds: (state.loadedRepositoryReadmeIds ?? []).map(
 			remapId,
 		),
-		loadedPullRequestFileIds: (state.loadedPullRequestFileIds ?? []).map(
-			remapId,
-		),
 		watches: Object.fromEntries(
 			Object.entries(state.watches).map(([email, repositoryIds]) => [
 				email,
@@ -3257,9 +3254,6 @@ export async function deleteRepositoryFromDrive({
 		),
 		loadedRepositoryReadmeIds: (state.loadedRepositoryReadmeIds ?? []).filter(
 			(id) => id !== repositoryId,
-		),
-		loadedPullRequestFileIds: (state.loadedPullRequestFileIds ?? []).filter(
-			(id) => !id.startsWith(`${repositoryId}:pull:`),
 		),
 		loadedThreadIds: (state.loadedThreadIds ?? []).filter(
 			(id) => !id.startsWith(`${repositoryId}:`),
@@ -4023,6 +4017,12 @@ export async function reviewPullRequestInDriveState({
 	if (!canMaintainRepository(actor, repository, "merge")) {
 		throw new Error("Review permission is required.")
 	}
+	if (!pullRequest.baseRepositoryZipFileId) {
+		throw new Error("Legacy pull requests must be recreated before review.")
+	}
+	const proposalZipFileId = state.pullRequestZipFileIds[pullRequest.id]
+	if (!proposalZipFileId)
+		throw new Error("Pull request proposal ZIP is missing.")
 	const now = new Date().toISOString()
 	const nextState: AppState = {
 		...state,
@@ -4030,7 +4030,14 @@ export async function reviewPullRequestInDriveState({
 			...state.pullRequests,
 			[repositoryId]: pullRequests.map((candidate) =>
 				candidate.number === pullRequestNumber
-					? { ...pullRequest, reviewedBy: actor.email, updatedAt: now }
+					? {
+							...pullRequest,
+							reviewedBy: actor.email,
+							reviewedBaseRepositoryZipFileId:
+								pullRequest.baseRepositoryZipFileId,
+							reviewedProposalZipFileId: proposalZipFileId,
+							updatedAt: now,
+						}
 					: candidate,
 			),
 		},
@@ -4046,6 +4053,8 @@ export async function reviewPullRequestInDriveState({
 			kind: "pull.reviewed",
 			targetId: pullRequest.id,
 			reviewedBy: actor.email,
+			reviewedBaseRepositoryZipFileId: pullRequest.baseRepositoryZipFileId,
+			reviewedProposalZipFileId: proposalZipFileId,
 			activity: [],
 			notifications: {},
 		},
@@ -4227,28 +4236,18 @@ async function completeRepositoryZipReplacement({
 	return savedState
 }
 
-export async function completePullRequestMergeUploadInDriveState({
+export async function mergePullRequestInDriveState({
 	accessToken,
 	state,
 	actor,
 	repositoryId,
 	pullRequestNumber,
-	uploadFolderId,
-	repositoryZipFileId,
-	repositoryZipBytes,
-	baseRepositoryZipFileId,
-	files,
 }: {
 	accessToken: string
 	state: AppState
 	actor: Actor
 	repositoryId: string
 	pullRequestNumber: number
-	uploadFolderId: string
-	repositoryZipFileId: string
-	repositoryZipBytes: number
-	baseRepositoryZipFileId: string
-	files: UploadedRepositoryFileMetadata[]
 }) {
 	const repository = findRepository(state, repositoryId)
 	const pullRequests = state.pullRequests[repositoryId] ?? []
@@ -4256,48 +4255,115 @@ export async function completePullRequestMergeUploadInDriveState({
 	if (pullRequest.state !== "open") {
 		throw new Error("Only open pull requests can be merged.")
 	}
+	if (!pullRequest.baseRepositoryZipFileId) {
+		throw new Error("Legacy pull requests must be recreated before merge.")
+	}
+	if (
+		state.repositoryZipFileIds[repositoryId] !==
+		pullRequest.baseRepositoryZipFileId
+	) {
+		throw new Error(
+			"Repository changed after this pull request was created. Recreate the pull request from the current repository.",
+		)
+	}
+	const proposalZipFileId = state.pullRequestZipFileIds[pullRequest.id]
+	if (!proposalZipFileId)
+		throw new Error("Pull request proposal ZIP is missing.")
+	if (
+		repository.policy.requiredStatusForMerge === "reviewed" &&
+		(pullRequest.reviewedBaseRepositoryZipFileId !==
+			pullRequest.baseRepositoryZipFileId ||
+			pullRequest.reviewedProposalZipFileId !== proposalZipFileId)
+	) {
+		throw new Error("Review does not match the current pull request artifacts.")
+	}
 	assertCanMergePullRequest(actor, repository, pullRequest)
-	return await completeRepositoryZipReplacement({
+	const proposalMetadata = await getGoogleDriveFileMetadata(
 		accessToken,
-		state,
-		repository,
-		uploadFolderId,
-		repositoryZipFileId,
-		repositoryZipBytes,
-		baseRepositoryZipFileId,
-		files,
-		saveReason: "pull.merge",
-		staleMessage: "Repository changed before the merge was committed.",
-		snapshotSource: "pull_request.merged",
-		pullRequestNumber,
-		buildNextState: ({ baseState, now }) => ({
-			...baseState,
-			repositories: state.repositories.map((candidate) =>
-				candidate.id === repositoryId
-					? { ...candidate, updatedAt: now }
-					: candidate,
-			),
-			pullRequests: {
-				...state.pullRequests,
-				[repositoryId]: pullRequests.map((candidate) =>
-					candidate.number === pullRequestNumber
-						? { ...pullRequest, state: "merged", updatedAt: now }
+		proposalZipFileId,
+	)
+	if (
+		!pullRequest.proposalZipSha256 ||
+		proposalMetadata.sha256Checksum !== pullRequest.proposalZipSha256
+	) {
+		throw new Error("Pull request proposal ZIP changed after creation.")
+	}
+	const repositoryZipBytes = Number(proposalMetadata.size)
+	if (
+		proposalMetadata.mimeType !== "application/zip" ||
+		!Number.isSafeInteger(repositoryZipBytes) ||
+		repositoryZipBytes <= 0
+	) {
+		throw new Error("Pull request proposal ZIP size is invalid.")
+	}
+	const uploadFolder = await createGoogleDriveFolder({
+		accessToken,
+		name: stagedUploadFolderName(`${repositoryId}-merge-copy`),
+		parentId: state.rootFolder.id,
+	})
+	try {
+		const copiedZip = await copyGoogleDriveFile({
+			accessToken,
+			fileId: proposalZipFileId,
+			parentId: uploadFolder.id,
+			name: APP_STORAGE.repositoryZipFileName,
+		})
+		if (
+			copiedZip.sha256Checksum !== pullRequest.proposalZipSha256 ||
+			copiedZip.size !== proposalMetadata.size
+		) {
+			throw new Error("Drive did not copy the proposal ZIP exactly.")
+		}
+		return await completeRepositoryZipReplacement({
+			accessToken,
+			state,
+			repository,
+			uploadFolderId: uploadFolder.id,
+			repositoryZipFileId: copiedZip.id,
+			repositoryZipBytes,
+			baseRepositoryZipFileId: pullRequest.baseRepositoryZipFileId,
+			// The backend cannot verify archive entries without reading ZIP bytes.
+			// Keep persisted file metadata empty; the browser hydrates it from the
+			// exact proposal ZIP after the Drive-side copy completes.
+			files: [],
+			saveReason: "pull.merge",
+			staleMessage: "Repository changed before the merge was committed.",
+			snapshotSource: "pull_request.merged",
+			pullRequestNumber,
+			buildNextState: ({ baseState, now }) => ({
+				...baseState,
+				repositories: state.repositories.map((candidate) =>
+					candidate.id === repositoryId
+						? { ...candidate, updatedAt: now }
 						: candidate,
 				),
-			},
-			activity: [
-				...state.activity,
-				{
-					id: `${pullRequest.id}:merged:${Date.now()}`,
-					repositoryId,
-					actorEmail: actor.email,
-					kind: "pr.merged",
-					timestamp: now,
-					message: `${actor.email} merged PR #${pullRequestNumber}`,
+				pullRequests: {
+					...state.pullRequests,
+					[repositoryId]: pullRequests.map((candidate) =>
+						candidate.number === pullRequestNumber
+							? { ...pullRequest, state: "merged", updatedAt: now }
+							: candidate,
+					),
 				},
-			],
-		}),
-	})
+				activity: [
+					...state.activity,
+					{
+						id: `${pullRequest.id}:merged:${Date.now()}`,
+						repositoryId,
+						actorEmail: actor.email,
+						kind: "pr.merged",
+						timestamp: now,
+						message: `${actor.email} merged PR #${pullRequestNumber}`,
+					},
+				],
+			}),
+		})
+	} catch (cause) {
+		await deleteGoogleDriveFile(accessToken, uploadFolder.id).catch(
+			() => undefined,
+		)
+		throw cause
+	}
 }
 
 export async function completeGitHubMirrorSyncUploadInDriveState({
@@ -4445,6 +4511,29 @@ export async function createRepositoryZipDownloadLink({
 	})
 }
 
+export async function createSnapshotZipDownloadLink({
+	accessToken,
+	state,
+	snapshot,
+	name,
+	browserApiKey,
+}: {
+	accessToken: string
+	state: AppState
+	snapshot: RepositorySnapshot
+	name: string
+	browserApiKey?: string
+}) {
+	return await createZipDownloadCopy({
+		accessToken,
+		state,
+		sourceFileId: snapshot.driveFileId,
+		name,
+		label: `snapshot-${snapshot.revision}`,
+		browserApiKey,
+	})
+}
+
 export async function createPullRequestZipDownloadLink({
 	accessToken,
 	state,
@@ -4471,6 +4560,37 @@ export async function createPullRequestZipDownloadLink({
 		sourceFileId: zipFileId,
 		name: `${repository.owner}-${repository.name}-pr-${pullRequestNumber}.zip`,
 		label: `${repository.owner}-${repository.name}-pr-${pullRequestNumber}`,
+		browserApiKey,
+	})
+}
+
+export async function createPullRequestBaseZipDownloadLink({
+	accessToken,
+	state,
+	repositoryId,
+	pullRequestNumber,
+	browserApiKey,
+}: {
+	accessToken: string
+	state: AppState
+	repositoryId: string
+	pullRequestNumber: number
+	browserApiKey?: string
+}) {
+	const repository = findRepository(state, repositoryId)
+	const pullRequest = findPullRequest(
+		state.pullRequests[repositoryId] ?? [],
+		pullRequestNumber,
+	)
+	if (!pullRequest.baseRepositoryZipFileId) {
+		throw new Error("Legacy pull request base ZIP is unavailable.")
+	}
+	return await createZipDownloadCopy({
+		accessToken,
+		state,
+		sourceFileId: pullRequest.baseRepositoryZipFileId,
+		name: `${repository.owner}-${repository.name}-pr-${pullRequestNumber}-base.zip`,
+		label: `${repository.owner}-${repository.name}-pr-${pullRequestNumber}-base`,
 		browserApiKey,
 	})
 }

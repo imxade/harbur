@@ -37,8 +37,6 @@ export const APP_STORAGE = {
 	repositoryAppendCompactionThreshold: 5,
 	readmeAssetMaxFiles: 20,
 	readmeAssetMaxBytes: 2 * 1024 * 1024,
-	pullRequestBaseSidecarMaxFiles: 200,
-	pullRequestBaseSidecarMaxBytes: 2 * 1024 * 1024,
 } as const
 
 export const APP_SESSION = {
@@ -68,12 +66,22 @@ export const APP_UPLOAD = {
 	stagedUploadSweepGraceMs: APP_TIMING.msPerHour,
 	stagedUploadSweepMaxDeletes: 10,
 	driveQuotaSafetyBytes: 10 * 1024 * 1024,
+	maxOpenPullRequestsPerActor: 25,
+	maxUploadSessionsPerWindow: 10,
+	uploadSessionWindowMs: 10 * 60 * 1000,
+} as const
+
+export const APP_INPUT = {
+	threadTitleMaxChars: 256,
+	threadBodyMaxChars: 100_000,
 } as const
 
 export const APP_DOWNLOAD = {
 	cleanupDelayMs: 0,
 	cleanupGraceMs: APP_TIMING.msPerHour,
 	stagedDownloadSweepMaxDeletes: 10,
+	maxLinkCreationsPerWindow: 30,
+	linkCreationWindowMs: 10 * 60 * 1000,
 } as const
 
 export const APP_GITHUB_MIRROR = {

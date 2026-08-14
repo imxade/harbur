@@ -11,7 +11,6 @@ import { join } from "node:path"
 import { z } from "zod"
 import {
 	beginGitHubMirrorSyncArchiveUpload,
-	beginMergedRepositoryArchiveUpload,
 	beginRepositoryArchiveUpload,
 	beginPullRequestArchiveUpload,
 	cancelZipArchiveUpload,
@@ -20,7 +19,7 @@ import {
 	commentOnPullRequestInDriveState,
 	completeRepositoryArchiveUpload,
 	completeGitHubMirrorSyncUploadInDriveState,
-	completePullRequestMergeUploadInDriveState,
+	mergePullRequestInDriveState,
 	completePullRequestArchiveUpload,
 	connectBackupDrive,
 	createIssueInDriveState,
@@ -35,6 +34,7 @@ import {
 	loadOrCreateAppState,
 	markNotificationsReadInDriveState,
 	createRepositoryZipDownloadLink,
+	createPullRequestBaseZipDownloadLink,
 	createPullRequestZipDownloadLink,
 	revokeZipDownloadLink,
 	reviewPullRequestInDriveState,
@@ -52,6 +52,7 @@ import { ANONYMOUS_ACTOR, isAdminEmail } from "./auth"
 import {
 	APP_ENV,
 	APP_FILES,
+	APP_INPUT,
 	APP_SESSION,
 	APP_TIMING,
 	APP_UPLOAD,
@@ -59,7 +60,6 @@ import {
 	GOOGLE_AUTH,
 } from "./app-config"
 import type { IssueState } from "./issues"
-import { assertCanMergePullRequest } from "./pulls"
 import {
 	appSettingsSchema,
 	githubMirrorSchema,
@@ -91,80 +91,73 @@ const repositoryUploadFileMetadataSchema = z.object({
 	encoding: z.enum(["utf8", "base64"]).optional(),
 })
 const repositoryRootFolderIdSchema = z.string().min(1).optional()
-const fileDiffSchema = z.object({
-	path: z.string().min(1),
-	status: z.enum(["added", "modified", "deleted", "unchanged"]),
-	beforeHash: z.string().optional(),
-	afterHash: z.string().optional(),
-})
 const beginZipUploadInputSchema = z.discriminatedUnion("kind", [
-	z.object({
-		kind: z.literal("repository"),
+	z
+		.object({
+			kind: z.literal("repository"),
+			name: z.string().min(1),
+			zipBytes: z.number().int().positive(),
+			origin: z.string().url(),
+		})
+		.strict(),
+	z
+		.object({
+			kind: z.literal("pull-request"),
+			repositoryId: z.string().min(1),
+			repositoryRootFolderId: repositoryRootFolderIdSchema,
+			baseRepositoryZipFileId: z.string().min(1),
+			zipBytes: z.number().int().positive(),
+			origin: z.string().url(),
+		})
+		.strict(),
+	z
+		.object({
+			kind: z.literal("github-mirror-sync"),
+			repositoryId: z.string().min(1),
+			repositoryRootFolderId: repositoryRootFolderIdSchema,
+			baseRepositoryZipFileId: z.string().min(1),
+			zipBytes: z.number().int().positive(),
+			origin: z.string().url(),
+		})
+		.strict(),
+])
+const completeRepositoryUploadInputSchema = z
+	.object({
 		name: z.string().min(1),
-		zipBytes: z.number().int().positive(),
-		origin: z.string().url(),
-	}),
-	z.object({
-		kind: z.literal("pull-request"),
+		description: z.string().optional(),
+		repositoryZipFileId: z.string().min(1),
+		uploadTicket: z.string().min(1),
+		files: z.array(repositoryUploadFileMetadataSchema),
+		githubMirror: githubMirrorSchema.optional(),
+	})
+	.strict()
+const completePullRequestUploadInputSchema = z
+	.object({
 		repositoryId: z.string().min(1),
 		repositoryRootFolderId: repositoryRootFolderIdSchema,
-		baseRepositoryZipFileId: z.string().min(1),
-		zipBytes: z.number().int().positive(),
-		origin: z.string().url(),
-	}),
-	z.object({
-		kind: z.literal("pull-merge"),
+		title: z.string().trim().min(1).max(APP_INPUT.threadTitleMaxChars),
+		body: z.string().trim().min(1).max(APP_INPUT.threadBodyMaxChars),
+		uploadZipFileId: z.string().min(1),
+		uploadTicket: z.string().min(1),
+	})
+	.strict()
+const mergePullRequestInputSchema = z
+	.object({
 		repositoryId: z.string().min(1),
 		repositoryRootFolderId: repositoryRootFolderIdSchema,
 		pullRequestNumber: z.number().int().positive(),
-		baseRepositoryZipFileId: z.string().min(1),
-		zipBytes: z.number().int().positive(),
-		origin: z.string().url(),
-	}),
-	z.object({
-		kind: z.literal("github-mirror-sync"),
+	})
+	.strict()
+const completeGitHubMirrorSyncUploadInputSchema = z
+	.object({
 		repositoryId: z.string().min(1),
 		repositoryRootFolderId: repositoryRootFolderIdSchema,
-		baseRepositoryZipFileId: z.string().min(1),
-		zipBytes: z.number().int().positive(),
-		origin: z.string().url(),
-	}),
-])
-const completeRepositoryUploadInputSchema = z.object({
-	name: z.string().min(1),
-	description: z.string().optional(),
-	repositoryZipFileId: z.string().min(1),
-	uploadTicket: z.string().min(1),
-	files: z.array(repositoryUploadFileMetadataSchema),
-	githubMirror: githubMirrorSchema.optional(),
-})
-const completePullRequestUploadInputSchema = z.object({
-	repositoryId: z.string().min(1),
-	repositoryRootFolderId: repositoryRootFolderIdSchema,
-	title: z.string().min(1),
-	body: z.string().min(1),
-	uploadZipFileId: z.string().min(1),
-	uploadTicket: z.string().min(1),
-	files: z.array(repositoryUploadFileMetadataSchema),
-	baseFiles: z.array(repositoryUploadFileMetadataSchema),
-	diff: z.array(fileDiffSchema),
-})
-const completePullRequestMergeUploadInputSchema = z.object({
-	repositoryId: z.string().min(1),
-	repositoryRootFolderId: repositoryRootFolderIdSchema,
-	pullRequestNumber: z.number().int().positive(),
-	repositoryZipFileId: z.string().min(1),
-	uploadTicket: z.string().min(1),
-	files: z.array(repositoryUploadFileMetadataSchema),
-})
-const completeGitHubMirrorSyncUploadInputSchema = z.object({
-	repositoryId: z.string().min(1),
-	repositoryRootFolderId: repositoryRootFolderIdSchema,
-	repositoryZipFileId: z.string().min(1),
-	uploadTicket: z.string().min(1),
-	files: z.array(repositoryUploadFileMetadataSchema),
-	githubMirror: githubMirrorSchema,
-})
+		repositoryZipFileId: z.string().min(1),
+		uploadTicket: z.string().min(1),
+		files: z.array(repositoryUploadFileMetadataSchema),
+		githubMirror: githubMirrorSchema,
+	})
+	.strict()
 const cancelZipUploadInputSchema = z.object({
 	uploadTicket: z.string().min(1),
 })
@@ -187,18 +180,6 @@ const zipUploadTicketPayloadSchema = z.discriminatedUnion("kind", [
 		actorEmail: z.string().email(),
 		repositoryId: z.string().min(1),
 		repositoryRootFolderId: z.string().min(1),
-		uploadFolderId: z.string().min(1),
-		baseRepositoryZipFileId: z.string().min(1),
-		zipBytes: z.number().int().positive(),
-		origin: z.string().url(),
-		expiresAt: z.number().int().positive(),
-	}),
-	z.object({
-		kind: z.literal("pull-merge"),
-		actorEmail: z.string().email(),
-		repositoryId: z.string().min(1),
-		repositoryRootFolderId: z.string().min(1),
-		pullRequestNumber: z.number().int().positive(),
 		uploadFolderId: z.string().min(1),
 		baseRepositoryZipFileId: z.string().min(1),
 		zipBytes: z.number().int().positive(),
@@ -231,6 +212,14 @@ type ZipDownloadTicketPayload = z.infer<typeof zipDownloadTicketPayloadSchema>
 
 const issueStateSchema = z.enum(["open", "closed"])
 const accessTokenCache = new Map<string, { token: string; expiresAt: number }>()
+const uploadSessionWindows = new Map<
+	string,
+	{ startedAt: number; count: number }
+>()
+const downloadLinkWindows = new Map<
+	string,
+	{ startedAt: number; count: number }
+>()
 
 function serverSecret() {
 	const clientSecret = process.env[APP_ENV.googleDriveClientSecret]
@@ -258,11 +247,93 @@ function currentRequestOrigin() {
 	return getRequestHeader("origin") ?? ""
 }
 
+function assertOriginMatchesRequestHost(origin: string) {
+	const forwardedHost = getRequestHeader("x-forwarded-host")
+	const requestHost = (forwardedHost ?? getRequestHeader("host") ?? "")
+		.split(",")[0]
+		?.trim()
+	const forwardedProtocol = getRequestHeader("x-forwarded-proto")
+		?.split(",")[0]
+		?.trim()
+	let parsed: URL
+	try {
+		parsed = new URL(origin)
+	} catch {
+		throw new Error("Request origin is invalid.")
+	}
+	if (!requestHost || parsed.host !== requestHost) {
+		throw new Error("Request origin does not match this host.")
+	}
+	if (forwardedProtocol && parsed.protocol !== `${forwardedProtocol}:`) {
+		throw new Error("Request origin protocol does not match this host.")
+	}
+}
+
+function assertSameOriginRequest() {
+	const origin = currentRequestOrigin()
+	if (!origin) throw new Error("Request origin is required.")
+	assertOriginMatchesRequestHost(origin)
+}
+
 function assertRequestOrigin(expectedOrigin: string) {
 	const origin = currentRequestOrigin()
-	if (origin && origin !== expectedOrigin) {
+	if (!origin || origin !== expectedOrigin) {
 		throw new Error("Request origin does not match this request.")
 	}
+	assertOriginMatchesRequestHost(origin)
+}
+
+function assertUploadSessionRate(actorEmail: string) {
+	consumeWindowRate({
+		windows: uploadSessionWindows,
+		key: actorEmail.toLowerCase(),
+		max: APP_UPLOAD.maxUploadSessionsPerWindow,
+		windowMs: APP_UPLOAD.uploadSessionWindowMs,
+		message: "Too many ZIP upload sessions. Try again later.",
+	})
+}
+
+function assertDownloadLinkRate(actor: Actor) {
+	const forwardedFor = getRequestHeader("x-forwarded-for")
+	const clientAddress = (
+		getRequestHeader("cf-connecting-ip") ??
+		forwardedFor?.split(",")[0] ??
+		getRequestHeader("x-real-ip") ??
+		"anonymous"
+	).trim()
+	consumeWindowRate({
+		windows: downloadLinkWindows,
+		key:
+			actor.role === "anonymous"
+				? `anonymous:${clientAddress}`
+				: `actor:${actor.id}`,
+		max: APP_DOWNLOAD.maxLinkCreationsPerWindow,
+		windowMs: APP_DOWNLOAD.linkCreationWindowMs,
+		message: "Too many ZIP download links. Try again later.",
+	})
+}
+
+function consumeWindowRate({
+	windows,
+	key,
+	max,
+	windowMs,
+	message,
+}: {
+	windows: Map<string, { startedAt: number; count: number }>
+	key: string
+	max: number
+	windowMs: number
+	message: string
+}) {
+	const now = Date.now()
+	const existing = windows.get(key)
+	if (!existing || now - existing.startedAt >= windowMs) {
+		windows.set(key, { startedAt: now, count: 1 })
+		return
+	}
+	if (existing.count >= max) throw new Error(message)
+	existing.count += 1
 }
 
 function signZipUploadTicket(payload: ZipUploadTicketPayload) {
@@ -340,6 +411,7 @@ function roleForEmail(email: string): Actor["role"] {
 }
 
 async function requireSession() {
+	assertSameOriginRequest()
 	const session = await getAppSession()
 	const user = session.data.user
 	if (!user) throw new Error("Sign in first.")
@@ -709,12 +781,6 @@ function visibleStateForActor(state: AppState, actor: Actor) {
 		),
 		loadedRepositoryReadmeIds: (state.loadedRepositoryReadmeIds ?? []).filter(
 			(repositoryId) => visibleIds.has(repositoryId),
-		),
-		loadedPullRequestFileIds: (state.loadedPullRequestFileIds ?? []).filter(
-			(pullRequestId) =>
-				[...visibleIds].some((repositoryId) =>
-					pullRequestId.startsWith(`${repositoryId}:pull:`),
-				),
 		),
 		loadedThreadIds: (state.loadedThreadIds ?? []).filter((threadId) =>
 			visibleThreadIds.has(threadId),
@@ -1107,6 +1173,7 @@ export const beginZipUploadServer = createServerFn({ method: "POST" })
 	.inputValidator((input: unknown) => beginZipUploadInputSchema.parse(input))
 	.handler(async ({ data }) => {
 		const { actor } = await requireSession()
+		assertUploadSessionRate(actor.email)
 		const accessToken = await ownerDriveAccessToken()
 		assertRequestOrigin(data.origin)
 		if (data.kind === "repository") {
@@ -1147,8 +1214,6 @@ export const beginZipUploadServer = createServerFn({ method: "POST" })
 			data.repositoryId,
 			{
 				repositoryRootFolderId: data.repositoryRootFolderId,
-				pullRequestNumbers:
-					data.kind === "pull-merge" ? [data.pullRequestNumber] : undefined,
 			},
 		)
 		void sweepStaleZipUploadFolders({ accessToken, state }).catch(
@@ -1162,6 +1227,7 @@ export const beginZipUploadServer = createServerFn({ method: "POST" })
 				baseRepositoryZipFileId: data.baseRepositoryZipFileId,
 				zipBytes: data.zipBytes,
 				origin: data.origin,
+				actorEmail: actor.email,
 			})
 			return {
 				...upload,
@@ -1203,34 +1269,7 @@ export const beginZipUploadServer = createServerFn({ method: "POST" })
 				}),
 			}
 		}
-		const pullRequest = state.pullRequests[repository.id]?.find(
-			(candidate) => candidate.number === data.pullRequestNumber,
-		)
-		if (!pullRequest) throw new Error("Pull request not found.")
-		assertCanMergePullRequest(actor, repository, pullRequest)
-		const upload = await beginMergedRepositoryArchiveUpload({
-			accessToken,
-			state,
-			repository,
-			baseRepositoryZipFileId: data.baseRepositoryZipFileId,
-			zipBytes: data.zipBytes,
-			origin: data.origin,
-		})
-		return {
-			...upload,
-			uploadTicket: signZipUploadTicket({
-				kind: "pull-merge",
-				actorEmail: actor.email,
-				repositoryId: repository.id,
-				repositoryRootFolderId: repository.rootFolderId,
-				pullRequestNumber: data.pullRequestNumber,
-				uploadFolderId: upload.uploadFolderId,
-				baseRepositoryZipFileId: data.baseRepositoryZipFileId,
-				zipBytes: data.zipBytes,
-				origin: data.origin,
-				expiresAt: Date.now() + APP_UPLOAD.zipUploadTicketTtlMs,
-			}),
-		}
+		throw new Error("Unsupported ZIP upload kind.")
 	})
 
 export const completeRepositoryUploadServer = createServerFn({ method: "POST" })
@@ -1703,9 +1742,6 @@ export const completePullRequestUploadServer = createServerFn({
 					uploadZipFileId: data.uploadZipFileId,
 					uploadZipBytes: ticket.zipBytes,
 					baseRepositoryZipFileId: ticket.baseRepositoryZipFileId,
-					files: data.files,
-					baseFiles: data.baseFiles,
-					diff: data.diff,
 				}),
 			{ includeDriveQuota: true },
 		)
@@ -1717,7 +1753,7 @@ export const commentOnPullRequestServer = createServerFn({ method: "POST" })
 			repositoryId: z.string().min(1),
 			repositoryRootFolderId: repositoryRootFolderIdSchema,
 			pullRequestNumber: z.number().int().positive(),
-			body: z.string().min(1),
+			body: z.string().trim().min(1).max(APP_INPUT.threadBodyMaxChars),
 		}),
 	)
 	.handler(
@@ -1740,7 +1776,7 @@ export const editPullRequestTitleServer = createServerFn({ method: "POST" })
 			repositoryId: z.string().min(1),
 			repositoryRootFolderId: repositoryRootFolderIdSchema,
 			pullRequestNumber: z.number().int().positive(),
-			title: z.string().min(1),
+			title: z.string().trim().min(1).max(APP_INPUT.threadTitleMaxChars),
 		}),
 	)
 	.handler(
@@ -1764,7 +1800,7 @@ export const editPullRequestMessageServer = createServerFn({ method: "POST" })
 			repositoryRootFolderId: repositoryRootFolderIdSchema,
 			pullRequestNumber: z.number().int().positive(),
 			messageId: z.string().min(1),
-			body: z.string().min(1),
+			body: z.string().trim().min(1).max(APP_INPUT.threadBodyMaxChars),
 		}),
 	)
 	.handler(
@@ -1826,43 +1862,25 @@ export const closePullRequestServer = createServerFn({ method: "POST" })
 	)
 
 export const mergePullRequestServer = createServerFn({ method: "POST" })
-	.inputValidator((input: unknown) =>
-		completePullRequestMergeUploadInputSchema.parse(input),
-	)
+	.inputValidator((input: unknown) => mergePullRequestInputSchema.parse(input))
 	.handler(async ({ data }) => {
 		const { actor } = await requireSession()
-		const ticket = verifyZipUploadTicket(data.uploadTicket)
-		if (
-			ticket.kind !== "pull-merge" ||
-			ticket.actorEmail.toLowerCase() !== actor.email.toLowerCase() ||
-			ticket.repositoryId !== data.repositoryId ||
-			ticket.pullRequestNumber !== data.pullRequestNumber ||
-			(data.repositoryRootFolderId &&
-				ticket.repositoryRootFolderId !== data.repositoryRootFolderId)
-		) {
-			throw new Error("Merge upload ticket does not match this request.")
-		}
 		return await runRepositoryWrite(
 			actor,
-			ticket.repositoryId,
-			ticket.repositoryRootFolderId,
+			data.repositoryId,
+			data.repositoryRootFolderId,
 			"pull.merge",
 			{
 				pullRequestNumber: data.pullRequestNumber,
 				includePullRequestThreadDetails: true,
 			},
 			async (accessToken, state) =>
-				await completePullRequestMergeUploadInDriveState({
+				await mergePullRequestInDriveState({
 					accessToken,
 					state,
 					actor,
-					repositoryId: ticket.repositoryId,
-					pullRequestNumber: ticket.pullRequestNumber,
-					uploadFolderId: ticket.uploadFolderId,
-					repositoryZipFileId: data.repositoryZipFileId,
-					repositoryZipBytes: ticket.zipBytes,
-					baseRepositoryZipFileId: ticket.baseRepositoryZipFileId,
-					files: data.files,
+					repositoryId: data.repositoryId,
+					pullRequestNumber: data.pullRequestNumber,
 				}),
 			{ includeDriveQuota: true },
 		)
@@ -1879,6 +1897,7 @@ export const createRepositoryZipDownloadLinkServer = createServerFn({
 	)
 	.handler(async ({ data }) => {
 		const actor = await optionalActor()
+		assertDownloadLinkRate(actor)
 		const { state } = await loadVisibleRepositoryState(
 			actor,
 			data.repositoryId,
@@ -1911,6 +1930,7 @@ export const createPullRequestZipDownloadLinkServer = createServerFn({
 	)
 	.handler(async ({ data }) => {
 		const actor = await optionalActor()
+		assertDownloadLinkRate(actor)
 		const { state } = await loadVisibleRepositoryState(
 			actor,
 			data.repositoryId,
@@ -1933,10 +1953,49 @@ export const createPullRequestZipDownloadLinkServer = createServerFn({
 		)
 	})
 
+export const createPullRequestBaseZipDownloadLinkServer = createServerFn({
+	method: "POST",
+})
+	.inputValidator(
+		z.object({
+			repositoryId: z.string().min(1),
+			repositoryRootFolderId: repositoryRootFolderIdSchema,
+			pullRequestNumber: z.number().int().positive(),
+		}),
+	)
+	.handler(async ({ data }) => {
+		const actor = await optionalActor()
+		assertDownloadLinkRate(actor)
+		const { state } = await loadVisibleRepositoryState(
+			actor,
+			data.repositoryId,
+			{
+				repositoryRootFolderId: data.repositoryRootFolderId,
+				pullRequestNumbers: [data.pullRequestNumber],
+			},
+		)
+		const link = await createPullRequestBaseZipDownloadLink({
+			accessToken: await ownerDriveAccessToken(),
+			state,
+			repositoryId: data.repositoryId,
+			pullRequestNumber: data.pullRequestNumber,
+			browserApiKey: googleDriveBrowserApiKey(),
+		})
+		return zipDownloadPayload(
+			actor,
+			link,
+			state.settings.downloadCleanupDelayMs,
+		)
+	})
+
 export const revokeZipDownloadLinkServer = createServerFn({ method: "POST" })
 	.inputValidator(revokeZipDownloadInputSchema)
 	.handler(async ({ data }) => {
 		const ticket = verifyZipDownloadTicket(data.downloadTicket)
+		const actor = await optionalActor()
+		if (ticket.actorId !== actorDownloadId(actor)) {
+			throw new Error("ZIP download ticket does not match this actor.")
+		}
 		await revokeZipDownloadLink({
 			accessToken: await ownerDriveAccessToken(),
 			fileId: ticket.fileId,

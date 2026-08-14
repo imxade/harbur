@@ -1,12 +1,13 @@
 import { createHash, timingSafeEqual } from "node:crypto"
 import { z } from "zod"
-import { APP_ENV } from "./app-config"
+import { APP_DOWNLOAD, APP_ENV } from "./app-config"
 import {
+	createSnapshotZipDownloadLink,
 	ensureIntegrationSnapshots,
 	loadOrCreateAppState,
+	revokeZipDownloadLink,
 	type AppState,
 } from "./drive-state"
-import { downloadGoogleDriveFile } from "./google-drive"
 
 const integrationTokenSchema = z.string().min(32).max(512)
 const repositoryNameSchema = z
@@ -21,6 +22,10 @@ const repositoryOwnerSchema = z
 	.max(100)
 	.refine((value) => !/[\\/\0]/.test(value))
 const revisionSchema = z.string().regex(/^[0-9a-f]{64}$/)
+const archiveLinkWindows = new Map<
+	string,
+	{ startedAt: number; count: number }
+>()
 
 export class IntegrationHttpError extends Error {
 	constructor(
@@ -48,6 +53,28 @@ function tokensEqual(left: string, right: string) {
 	const leftDigest = createHash("sha256").update(left).digest()
 	const rightDigest = createHash("sha256").update(right).digest()
 	return timingSafeEqual(leftDigest, rightDigest)
+}
+
+function assertArchiveLinkRate(request: Request) {
+	const key = (
+		request.headers.get("cf-connecting-ip") ??
+		request.headers.get("x-forwarded-for")?.split(",")[0] ??
+		request.headers.get("x-real-ip") ??
+		"anonymous"
+	).trim()
+	const now = Date.now()
+	const existing = archiveLinkWindows.get(key)
+	if (
+		!existing ||
+		now - existing.startedAt >= APP_DOWNLOAD.linkCreationWindowMs
+	) {
+		archiveLinkWindows.set(key, { startedAt: now, count: 1 })
+		return
+	}
+	if (existing.count >= APP_DOWNLOAD.maxLinkCreationsPerWindow) {
+		throw new IntegrationHttpError(429, "Too many archive download links.")
+	}
+	existing.count += 1
 }
 
 export function hasValidIntegrationToken(request: Request) {
@@ -192,6 +219,7 @@ export async function exactSnapshotArchive({
 	repositoryName: string
 	revision: string
 }) {
+	assertArchiveLinkRate(request)
 	const normalizedOwner = repositoryOwnerSchema.parse(owner)
 	const normalizedName = repositoryNameSchema.parse(repositoryName)
 	const normalizedRevision = revisionSchema.parse(revision)
@@ -213,21 +241,29 @@ export async function exactSnapshotArchive({
 		(candidate) => candidate.revision === normalizedRevision,
 	)
 	if (!snapshot) throw new IntegrationHttpError(404, "Snapshot not found.")
-	const bytes = await downloadGoogleDriveFile(accessToken, snapshot.driveFileId)
-	if (bytes.byteLength !== snapshot.archiveBytes) {
+	const browserApiKey = process.env[APP_ENV.googleDriveBrowserApiKey]?.trim()
+	if (!browserApiKey) {
 		throw new IntegrationHttpError(
-			502,
-			"Stored snapshot size verification failed.",
+			503,
+			"Direct archive downloads are unavailable.",
 		)
 	}
-	const sha256 = createHash("sha256").update(bytes).digest("hex")
-	if (sha256 !== snapshot.sha256) {
-		throw new IntegrationHttpError(
-			502,
-			"Stored snapshot digest verification failed.",
-		)
-	}
-	return { bytes, repository, snapshot }
+	const link = await createSnapshotZipDownloadLink({
+		accessToken,
+		state,
+		snapshot,
+		name: `${repository.name}-${snapshot.revision}.zip`,
+		browserApiKey,
+	})
+	globalThis.setTimeout(() => {
+		void revokeZipDownloadLink({
+			accessToken,
+			fileId: link.fileId,
+			folderId: link.folderId,
+			permissionId: link.permissionId,
+		}).catch(() => undefined)
+	}, 60_000)
+	return { link, repository, snapshot }
 }
 
 export function integrationErrorResponse(error: unknown) {

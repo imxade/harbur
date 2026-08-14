@@ -14,7 +14,11 @@ export type PullRequestRecord = {
 	title: string
 	body: string
 	state: PullRequestState
+	baseRepositoryZipFileId?: string
+	proposalZipSha256?: string
 	reviewedBy?: string
+	reviewedBaseRepositoryZipFileId?: string
+	reviewedProposalZipFileId?: string
 	createdAt: string
 	updatedAt: string
 	editedAt?: string
@@ -58,7 +62,7 @@ export function diffRepositoryFiles(
 		if (before && !after) {
 			return { path, status: "deleted", beforeHash: before.contentHash }
 		}
-		if (before?.contentHash !== after?.contentHash) {
+		if (before && after && !repositoryFilesEqual(before, after)) {
 			return {
 				path,
 				status: "modified",
@@ -75,35 +79,15 @@ export function diffRepositoryFiles(
 	})
 }
 
-export function compactPullRequestChanges(
-	baseFiles: RepositoryFile[],
-	uploadedFiles: RepositoryFile[],
-) {
-	const changed = new Set(
-		diffRepositoryFiles(baseFiles, uploadedFiles)
-			.filter((diff) => diff.status === "added" || diff.status === "modified")
-			.map((diff) => diff.path),
-	)
-	return uploadedFiles.filter((file) =>
-		changed.has(normalizeRepositoryPath(file.path)),
-	)
-}
-
-export function applyPullRequestFiles(
-	baseFiles: RepositoryFile[],
-	pullRequest: { diff: FileDiff[]; files: RepositoryFile[] },
-) {
-	const output = new Map(baseFiles.map((file) => [file.path, file]))
-	for (const fileDiff of pullRequest.diff) {
-		if (fileDiff.status === "deleted") output.delete(fileDiff.path)
+function repositoryFilesEqual(left: RepositoryFile, right: RepositoryFile) {
+	if (left.size !== right.size) return false
+	const leftBytes = repositoryFileBytes(left)
+	const rightBytes = repositoryFileBytes(right)
+	if (leftBytes.byteLength !== rightBytes.byteLength) return false
+	for (let index = 0; index < leftBytes.byteLength; index += 1) {
+		if (leftBytes[index] !== rightBytes[index]) return false
 	}
-	for (const file of pullRequest.files) {
-		assertRepositoryContentPath(file.path)
-		output.set(file.path, file)
-	}
-	return [...output.values()].sort((left, right) =>
-		left.path.localeCompare(right.path),
-	)
+	return true
 }
 
 export function assertCanMergePullRequest(
@@ -120,7 +104,10 @@ export function assertCanMergePullRequest(
 	}
 	if (
 		repository.policy.requiredStatusForMerge === "reviewed" &&
-		(!pr.reviewedBy || pr.reviewedBy === pr.authorEmail)
+		(!pr.reviewedBy ||
+			pr.reviewedBy === pr.authorEmail ||
+			!pr.reviewedBaseRepositoryZipFileId ||
+			!pr.reviewedProposalZipFileId)
 	) {
 		throw new Error("Review by another maintainer is required.")
 	}

@@ -20,7 +20,7 @@ jobs:
       - name: Check
         run: npm run check
 
-      - name: Lint
+      - name: Biome formatting and lint
         run: npm run lint
 
       - name: Test
