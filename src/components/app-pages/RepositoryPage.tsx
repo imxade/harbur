@@ -31,7 +31,7 @@ export function RepositoryPage({
 		createIssue,
 		createPullRequest,
 		deleteRepository,
-		downloadPullRequestPreviewZip,
+		downloadPullRequestArchiveZip,
 		downloadRepositoryZip,
 		driveState,
 		editIssueMessage,
@@ -380,7 +380,7 @@ export function RepositoryPage({
 					onEditTitle={editPullRequestTitle}
 					onReview={reviewPullRequest}
 					onClose={closePullRequest}
-					onDownloadMerged={downloadPullRequestPreviewZip}
+					onDownloadArchive={downloadPullRequestArchiveZip}
 					onMerge={mergePullRequest}
 					onSignIn={signIn}
 					uploadProgress={uploadProgress}

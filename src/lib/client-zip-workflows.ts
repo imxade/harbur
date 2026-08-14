@@ -2,8 +2,8 @@ import "@tanstack/react-start/client-only"
 import { APP_DOWNLOAD, APP_TIMING } from "./app-config"
 import type {
 	ClientPullRequestDiffSnapshot,
-	ClientZipWorkflowCache,
-} from "./client-zip-cache"
+	ClientPullRequestDiffCache,
+} from "./client-diff-cache"
 import type {
 	BeginZipUploadData,
 	ClientZipWorkflowContext,
@@ -14,6 +14,7 @@ import type { AppState } from "./drive-state"
 import { assertDriveQuotaAllowsUpload } from "./drive-quota"
 import { fetchGitHubRepositorySnapshot } from "./github"
 import { diffRepositoryFiles } from "./pulls"
+import type { RepositoryFile } from "./types"
 import { prepareRepositoryUploadFiles } from "./repositories/uploads"
 import {
 	buildClientZipBlob,
@@ -124,18 +125,14 @@ export async function createPullRequestFromFolder({
 	files,
 }: {
 	context: ClientZipWorkflowContext
-	cache: ClientZipWorkflowCache
+	cache: ClientPullRequestDiffCache
 	repositoryId: string
 	title: string
 	body: string
 	files: File[]
 }) {
 	const state = requireState(context)
-	const baseSnapshot = await loadRepositoryZipSnapshot(
-		context,
-		cache,
-		repositoryId,
-	)
+	const baseSnapshot = await loadRepositoryZipSnapshot(context, repositoryId)
 	const uploadSnapshot = await prepareClientUploadSnapshot({
 		files,
 		settings: state.settings,
@@ -178,32 +175,27 @@ export async function createPullRequestFromFolder({
 			nextState.pullRequestZipFileIds[pullRequest.id] === zipFile.id,
 	)
 	if (createdPullRequest?.baseRepositoryZipFileId) {
-		const proposalSnapshot = {
-			zipFileId: zipFile.id,
-			files: uploadSnapshot.files,
-		}
-		cache.pullRequestZips.set(createdPullRequest.id, proposalSnapshot)
-		cache.pullRequestBaseZips.set(createdPullRequest.id, baseSnapshot)
-		cache.pullRequestDiffs.set(createdPullRequest.id, {
-			baseZipFileId: createdPullRequest.baseRepositoryZipFileId,
-			proposalZipFileId: zipFile.id,
-			diff,
-			baseFiles: baseSnapshot.files,
-			proposalFiles: proposalSnapshot.files,
-		})
-		trimPullRequestCaches(cache)
+		cache.pullRequestDiffs.set(
+			createdPullRequest.id,
+			pullRequestDiffSnapshot({
+				baseZipFileId: createdPullRequest.baseRepositoryZipFileId,
+				proposalZipFileId: zipFile.id,
+				baseFiles: baseSnapshot.files,
+				proposalFiles: uploadSnapshot.files,
+				diff,
+			}),
+		)
+		trimPullRequestDiffCache(cache)
 	}
 	return nextState
 }
 
 export async function mergePullRequestWithProposal({
 	context,
-	cache,
 	repositoryId,
 	pullRequestNumber,
 }: {
 	context: ClientZipWorkflowContext
-	cache: ClientZipWorkflowCache
 	repositoryId: string
 	pullRequestNumber: number
 }) {
@@ -222,29 +214,22 @@ export async function mergePullRequestWithProposal({
 			"Repository changed after this pull request was created. Recreate the pull request from the current repository.",
 		)
 	}
-	const pullSnapshot = await loadPullRequestZipSnapshot(
-		context,
-		cache,
-		repositoryId,
-		pullRequestNumber,
-	)
 	const repositoryRootFolderId = context.getRepositoryRootFolderId(repositoryId)
 	const nextState = await context.mergePullRequest({
 		repositoryId,
 		repositoryRootFolderId,
 		pullRequestNumber,
 	})
-	const zipFileId = nextState.repositoryZipFileIds[repositoryId]
-	cache.repositoryZips.set(repositoryId, {
-		zipFileId,
-		files: pullSnapshot.files,
-	})
-	trimCache(cache.repositoryZips)
+	const repositorySnapshot = await loadRepositoryZipSnapshot(
+		context,
+		repositoryId,
+		nextState,
+	)
 	return {
 		...nextState,
 		repositoryFiles: {
 			...nextState.repositoryFiles,
-			[repositoryId]: pullSnapshot.files,
+			[repositoryId]: repositorySnapshot.files,
 		},
 		loadedRepositoryFileIds: [
 			...new Set([...(nextState.loadedRepositoryFileIds ?? []), repositoryId]),
@@ -265,14 +250,12 @@ export async function downloadRepositoryZipFile(
 	)
 }
 
-export async function downloadPullRequestPreviewZipFile({
+export async function downloadPullRequestArchiveZipFile({
 	context,
-	cache,
 	repositoryId,
 	pullRequestNumber,
 }: {
 	context: ClientZipWorkflowContext
-	cache: ClientZipWorkflowCache
 	repositoryId: string
 	pullRequestNumber: number
 }) {
@@ -282,24 +265,28 @@ export async function downloadPullRequestPreviewZipFile({
 		repositoryId,
 		pullRequestNumber,
 	)
-	if (pullRequest.state !== "open") {
-		throw new Error("Only open pull requests can be downloaded before merge.")
+	if (pullRequest.state === "closed") {
+		throw new Error("Closed pull request archives are unavailable.")
 	}
-	const pullSnapshot = await loadPullRequestZipSnapshot(
-		context,
-		cache,
-		repositoryId,
-		pullRequestNumber,
-	)
-	return {
-		blob: await buildClientZipBlob({ files: pullSnapshot.files }),
-		name: `${repositoryId.replaceAll("/", "-")}-pr-${pullRequestNumber}-merged.zip`,
-	} satisfies DownloadFile
+	const result =
+		pullRequest.state === "merged"
+			? await context.downloadPullRequestBaseZip({
+					repositoryId,
+					repositoryRootFolderId:
+						context.getRepositoryRootFolderId(repositoryId),
+					pullRequestNumber,
+				})
+			: await context.downloadPullRequestZip({
+					repositoryId,
+					repositoryRootFolderId:
+						context.getRepositoryRootFolderId(repositoryId),
+					pullRequestNumber,
+				})
+	return await zipBlobFromResult(context, result)
 }
 
 export async function loadPullRequestZipSnapshot(
 	context: ClientZipWorkflowContext,
-	cache: ClientZipWorkflowCache,
 	repositoryId: string,
 	pullRequestNumber: number,
 	state: AppState | null = context.getState(),
@@ -311,10 +298,6 @@ export async function loadPullRequestZipSnapshot(
 		pullRequestNumber,
 	)
 	const zipFileId = state.pullRequestZipFileIds[pullRequest.id]
-	const cached = cache.pullRequestZips.get(pullRequest.id)
-	if (cached && cached.zipFileId === zipFileId) {
-		return cached
-	}
 	const result = await context.downloadPullRequestZip({
 		repositoryId,
 		repositoryRootFolderId: context.getRepositoryRootFolderId(repositoryId),
@@ -330,14 +313,12 @@ export async function loadPullRequestZipSnapshot(
 			"pull-request",
 		),
 	}
-	cache.pullRequestZips.set(pullRequest.id, snapshot)
-	trimPullRequestCaches(cache)
 	return snapshot
 }
 
 export async function loadPullRequestDiffSnapshot(
 	context: ClientZipWorkflowContext,
-	cache: ClientZipWorkflowCache,
+	cache: ClientPullRequestDiffCache,
 	repositoryId: string,
 	pullRequestNumber: number,
 	state: AppState | null = context.getState(),
@@ -348,10 +329,10 @@ export async function loadPullRequestDiffSnapshot(
 		repositoryId,
 		pullRequestNumber,
 	)
-	const baseZipFileId = pullRequest.baseRepositoryZipFileId
+	const baseZipFileId = state.repositoryZipFileIds[repositoryId]
 	const proposalZipFileId = state.pullRequestZipFileIds[pullRequest.id]
 	if (!baseZipFileId || !proposalZipFileId) {
-		throw new Error("Legacy pull request artifacts are unavailable.")
+		throw new Error("Pull request artifacts are unavailable.")
 	}
 	const cached = cache.pullRequestDiffs.get(pullRequest.id)
 	if (
@@ -360,45 +341,18 @@ export async function loadPullRequestDiffSnapshot(
 	) {
 		return cached
 	}
-	let baseSnapshot = cache.pullRequestBaseZips.get(pullRequest.id)
-	if (!baseSnapshot || baseSnapshot.zipFileId !== baseZipFileId) {
-		const currentRepositorySnapshot = cache.repositoryZips.get(repositoryId)
-		if (currentRepositorySnapshot?.zipFileId === baseZipFileId) {
-			baseSnapshot = currentRepositorySnapshot
-		}
-	}
-	if (!baseSnapshot || baseSnapshot.zipFileId !== baseZipFileId) {
-		const baseDownload = await zipBlobFromResult(
-			context,
-			await context.downloadPullRequestBaseZip({
-				repositoryId,
-				repositoryRootFolderId: context.getRepositoryRootFolderId(repositoryId),
-				pullRequestNumber,
-			}),
-		)
-		const expectedBaseSha256 = state.repositorySnapshots[repositoryId]?.find(
-			(snapshot) => snapshot.driveFileId === baseZipFileId,
-		)?.sha256
-		await assertBlobSha256(baseDownload.blob, expectedBaseSha256)
-		baseSnapshot = {
-			zipFileId: baseZipFileId,
-			files: await repositoryFilesFromZipBlob(
-				baseDownload.blob,
-				state.settings,
-				"repository",
-			),
-		}
-		cache.pullRequestBaseZips.set(pullRequest.id, baseSnapshot)
-		trimPullRequestCaches(cache)
-	}
+	const baseSnapshot = await loadRepositoryZipSnapshot(
+		context,
+		repositoryId,
+		state,
+	)
 	const proposalSnapshot = await loadPullRequestZipSnapshot(
 		context,
-		cache,
 		repositoryId,
 		pullRequestNumber,
 		state,
 	)
-	const snapshot: ClientPullRequestDiffSnapshot = {
+	const snapshot = pullRequestDiffSnapshot({
 		baseZipFileId,
 		proposalZipFileId,
 		diff: diffRepositoryFiles(
@@ -407,20 +361,18 @@ export async function loadPullRequestDiffSnapshot(
 		).filter((fileDiff) => fileDiff.status !== "unchanged"),
 		baseFiles: baseSnapshot.files,
 		proposalFiles: proposalSnapshot.files,
-	}
+	})
 	cache.pullRequestDiffs.set(pullRequest.id, snapshot)
-	trimPullRequestCaches(cache)
+	trimPullRequestDiffCache(cache)
 	return snapshot
 }
 
 export async function syncDueGitHubMirrors({
 	context,
-	cache,
 	state,
 	onState,
 }: {
 	context: ClientZipWorkflowContext
-	cache: ClientZipWorkflowCache
 	state: AppState
 	onState: (state: AppState) => void
 }) {
@@ -473,7 +425,6 @@ export async function syncDueGitHubMirrors({
 				files: clientUploadMetadata(repositoryFiles, { includeSidecars: true }),
 				githubMirror: snapshot.mirror,
 			})
-			cache.repositoryZips.delete(repository.id)
 			onState(currentState)
 		}
 	} finally {
@@ -483,18 +434,19 @@ export async function syncDueGitHubMirrors({
 
 export async function loadRepositoryZipSnapshot(
 	context: ClientZipWorkflowContext,
-	cache: ClientZipWorkflowCache,
 	repositoryId: string,
+	state: AppState = requireState(context),
 ) {
-	const state = requireState(context)
 	const zipFileId = state.repositoryZipFileIds[repositoryId]
-	const cached = cache.repositoryZips.get(repositoryId)
-	if (cached && cached.zipFileId === zipFileId) return cached
 	const result = await context.downloadRepositoryZip({
 		repositoryId,
 		repositoryRootFolderId: context.getRepositoryRootFolderId(repositoryId),
 	})
 	const download = await zipBlobFromResult(context, result)
+	const expectedSha256 = state.repositorySnapshots[repositoryId]?.find(
+		(snapshot) => snapshot.driveFileId === zipFileId,
+	)?.sha256
+	await assertBlobSha256(download.blob, expectedSha256)
 	const snapshot = {
 		zipFileId,
 		files: await repositoryFilesFromZipBlob(
@@ -503,8 +455,6 @@ export async function loadRepositoryZipSnapshot(
 			"repository",
 		),
 	}
-	cache.repositoryZips.set(repositoryId, snapshot)
-	trimCache(cache.repositoryZips)
 	return snapshot
 }
 
@@ -540,25 +490,50 @@ async function uploadPreparedArchiveToDrive(
 	}
 }
 
-function trimCache<T>(cache: Map<string, T>, maxEntries = 4) {
-	while (cache.size > maxEntries) {
-		const oldest = cache.keys().next().value
+function trimPullRequestDiffCache(
+	cache: ClientPullRequestDiffCache,
+	maxEntries = 4,
+) {
+	while (cache.pullRequestDiffs.size > maxEntries) {
+		const oldest = cache.pullRequestDiffs.keys().next().value
 		if (!oldest) return
-		cache.delete(oldest)
+		cache.pullRequestDiffs.delete(oldest)
 	}
 }
 
-function trimPullRequestCaches(cache: ClientZipWorkflowCache, maxEntries = 4) {
-	const keys = [...cache.pullRequestDiffs.keys()]
-	while (keys.length > maxEntries) {
-		const oldest = keys.shift()
-		if (!oldest) return
-		cache.pullRequestDiffs.delete(oldest)
-		cache.pullRequestBaseZips.delete(oldest)
-		cache.pullRequestZips.delete(oldest)
+function pullRequestDiffSnapshot({
+	baseZipFileId,
+	proposalZipFileId,
+	diff,
+	baseFiles,
+	proposalFiles,
+}: {
+	baseZipFileId: string
+	proposalZipFileId: string
+	diff: ClientPullRequestDiffSnapshot["diff"]
+	baseFiles: RepositoryFile[]
+	proposalFiles: RepositoryFile[]
+}): ClientPullRequestDiffSnapshot {
+	const base = new Map(baseFiles.map((file) => [file.path, file]))
+	const proposal = new Map(proposalFiles.map((file) => [file.path, file]))
+	return {
+		baseZipFileId,
+		proposalZipFileId,
+		diff: diff.map((fileDiff) => ({
+			...fileDiff,
+			before: diffContent(base.get(fileDiff.path)),
+			after: diffContent(proposal.get(fileDiff.path)),
+		})),
 	}
-	trimCache(cache.pullRequestBaseZips, maxEntries)
-	trimCache(cache.pullRequestZips, maxEntries)
+}
+
+function diffContent(file: RepositoryFile | undefined) {
+	return file
+		? {
+				content: file.content,
+				encoding: file.encoding,
+			}
+		: undefined
 }
 
 async function assertBlobSha256(blob: Blob, expected: string | undefined) {

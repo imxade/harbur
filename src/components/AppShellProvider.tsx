@@ -17,10 +17,10 @@ import {
 } from "../lib/google-auth-client"
 import { ANONYMOUS_ACTOR } from "../lib/auth"
 import {
-	clearClientZipWorkflowCache,
-	createClientZipWorkflowCache,
+	clearClientPullRequestDiffCache,
+	createClientPullRequestDiffCache,
 	type ClientPullRequestDiffSnapshot,
-} from "../lib/client-zip-cache"
+} from "../lib/client-diff-cache"
 import type {
 	BeginZipUploadData,
 	ClientZipWorkflowContext,
@@ -195,7 +195,7 @@ type AppShellState = {
 		repositoryId: string,
 		pullRequestNumber: number,
 	) => Promise<void>
-	downloadPullRequestPreviewZip: (
+	downloadPullRequestArchiveZip: (
 		repositoryId: string,
 		pullRequestNumber: number,
 	) => Promise<DownloadFile>
@@ -504,7 +504,7 @@ export default function AppShellProvider({
 	)
 	const mirrorSyncStarted = useRef(false)
 	const driveStateRef = useRef<AppState | null>(null)
-	const zipWorkflowCache = useRef(createClientZipWorkflowCache())
+	const pullRequestDiffCache = useRef(createClientPullRequestDiffCache())
 
 	useEffect(() => {
 		driveStateRef.current = driveState
@@ -651,7 +651,6 @@ export default function AppShellProvider({
 			.then(({ syncDueGitHubMirrors }) =>
 				syncDueGitHubMirrors({
 					context: zipWorkflowContext(),
-					cache: zipWorkflowCache.current,
 					state: driveState,
 					onState: (nextState) => {
 						if (!active) return
@@ -712,7 +711,7 @@ export default function AppShellProvider({
 
 	async function signOut() {
 		await logoutSessionFn()
-		clearClientZipWorkflowCache(zipWorkflowCache.current)
+		clearClientPullRequestDiffCache(pullRequestDiffCache.current)
 		setPullRequestDiffs({})
 		setUser(null)
 		setDriveState(await getDriveStateFn())
@@ -750,7 +749,6 @@ export default function AppShellProvider({
 		if (!(mergedState.repositoryFiles[repositoryId]?.length ?? 0)) {
 			const snapshot = await zipWorkflows.loadRepositoryZipSnapshot(
 				zipWorkflowContext(),
-				zipWorkflowCache.current,
 				repositoryId,
 			)
 			applyDriveState({
@@ -770,7 +768,7 @@ export default function AppShellProvider({
 		if (options?.pullRequestNumber) {
 			const snapshot = await zipWorkflows.loadPullRequestDiffSnapshot(
 				zipWorkflowContext(),
-				zipWorkflowCache.current,
+				pullRequestDiffCache.current,
 				repositoryId,
 				options.pullRequestNumber,
 				mergedState,
@@ -982,7 +980,7 @@ export default function AppShellProvider({
 			applyDriveState(
 				await createPullRequestFromFolder({
 					context: zipWorkflowContext(),
-					cache: zipWorkflowCache.current,
+					cache: pullRequestDiffCache.current,
 					repositoryId: input.repositoryId,
 					title: input.title,
 					body: input.body,
@@ -1063,7 +1061,6 @@ export default function AppShellProvider({
 			applyDriveState(
 				await mergePullRequestWithProposal({
 					context: zipWorkflowContext(),
-					cache: zipWorkflowCache.current,
 					repositoryId,
 					pullRequestNumber,
 				}),
@@ -1079,15 +1076,14 @@ export default function AppShellProvider({
 		return await downloadRepositoryZipFile(zipWorkflowContext(), repositoryId)
 	}
 
-	async function downloadPullRequestPreviewZip(
+	async function downloadPullRequestArchiveZip(
 		repositoryId: string,
 		pullRequestNumber: number,
 	) {
 		if (!driveState) throw new Error("Repository state is still loading.")
-		const { downloadPullRequestPreviewZipFile } = await loadZipWorkflows()
-		return await downloadPullRequestPreviewZipFile({
+		const { downloadPullRequestArchiveZipFile } = await loadZipWorkflows()
+		return await downloadPullRequestArchiveZipFile({
 			context: zipWorkflowContext(),
-			cache: zipWorkflowCache.current,
 			repositoryId,
 			pullRequestNumber,
 		})
@@ -1129,7 +1125,7 @@ export default function AppShellProvider({
 		reviewPullRequest,
 		closePullRequest,
 		mergePullRequest,
-		downloadPullRequestPreviewZip,
+		downloadPullRequestArchiveZip,
 		downloadRepositoryZip,
 	}
 	return (

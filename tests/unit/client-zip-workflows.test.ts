@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	createPullRequestFromFolder,
+	downloadPullRequestArchiveZipFile,
 	loadPullRequestDiffSnapshot,
-	loadPullRequestZipSnapshot,
 	mergePullRequestWithProposal,
 	uploadRepositoryFromFolder,
 } from "../../src/lib/client-zip-workflows"
@@ -10,7 +10,7 @@ import type {
 	BeginZipUploadData,
 	ClientZipWorkflowContext,
 } from "../../src/lib/client-zip-contract"
-import { createClientZipWorkflowCache } from "../../src/lib/client-zip-cache"
+import { createClientPullRequestDiffCache } from "../../src/lib/client-diff-cache"
 import { APP_SCHEMA, APP_SLUG } from "../../src/lib/app-config"
 import type { AppState } from "../../src/lib/drive-state"
 import type { RepositoryFile, RepositoryManifest } from "../../src/lib/types"
@@ -91,7 +91,7 @@ describe("client ZIP workflows", () => {
 
 		await createPullRequestFromFolder({
 			context: harness.context,
-			cache: createClientZipWorkflowCache(),
+			cache: createClientPullRequestDiffCache(),
 			repositoryId: repository.id,
 			title: "Change index",
 			body: "Update code",
@@ -136,49 +136,7 @@ describe("client ZIP workflows", () => {
 		expect(Object.keys(completeData ?? {})).not.toContain("diff")
 	})
 
-	it("loads proposal files from the client-only cache without mutating app state", async () => {
-		const repository = testRepository()
-		const pullRequest = {
-			id: "pr-1",
-			number: 1,
-			authorEmail: "author@example.com",
-			title: "Change index",
-			body: "Update code",
-			state: "open" as const,
-			baseRepositoryZipFileId: "repo-zip-1",
-			createdAt: now,
-			updatedAt: now,
-			comments: [],
-		}
-		const state = appState({
-			repositories: [repository],
-			repositoryZipFileIds: { [repository.id]: "repo-zip-1" },
-			pullRequests: { [repository.id]: [pullRequest] },
-			pullRequestZipFileIds: { [pullRequest.id]: "pr-zip-1" },
-		})
-		const cachedFiles = [
-			{ path: "src/index.ts", content: "console.log(2)", size: 14 },
-		]
-		const cache = createClientZipWorkflowCache()
-		cache.pullRequestZips.set(pullRequest.id, {
-			zipFileId: "pr-zip-1",
-			files: cachedFiles,
-		})
-		const harness = workflowHarness(state)
-
-		const snapshot = await loadPullRequestZipSnapshot(
-			harness.context,
-			cache,
-			repository.id,
-			pullRequest.number,
-		)
-
-		expect(snapshot.files).toEqual(cachedFiles)
-		expect(harness.downloadPullRequestZip).not.toHaveBeenCalled()
-		expect(harness.context.getState()).toBe(state)
-	})
-
-	it("computes and caches immutable base-to-proposal diffs only in the browser", async () => {
+	it("caches only current-base-to-proposal display diffs in the browser", async () => {
 		const repository = testRepository()
 		const pullRequest = {
 			id: "pr-1",
@@ -206,10 +164,10 @@ describe("client ZIP workflows", () => {
 			],
 		})
 		const harness = workflowHarness(state, {
-			[pullRequestBaseZipUrl(repository.id, pullRequest.number)]: baseZip,
+			[repositoryZipUrl(repository.id)]: baseZip,
 			[pullRequestZipUrl(repository.id, pullRequest.number)]: proposalZip,
 		})
-		const cache = createClientZipWorkflowCache()
+		const cache = createClientPullRequestDiffCache()
 
 		const first = await loadPullRequestDiffSnapshot(
 			harness.context,
@@ -229,10 +187,145 @@ describe("client ZIP workflows", () => {
 			{ path: "src/index.ts", status: "modified" },
 			{ path: "src/new.ts", status: "added" },
 		])
+		expect(first.diff[1]).toMatchObject({
+			before: { content: "console.log(1)" },
+			after: { content: "console.log(2)" },
+		})
+		expect(Object.keys(cache)).toEqual(["pullRequestDiffs"])
 		expect(second).toBe(first)
-		expect(harness.downloadPullRequestBaseZip).toHaveBeenCalledOnce()
+		expect(harness.downloadRepositoryZip).toHaveBeenCalledOnce()
 		expect(harness.downloadPullRequestZip).toHaveBeenCalledOnce()
 		expect(harness.context.getState()).toBe(state)
+	})
+
+	it("recalculates a cached PR diff when the repository base changes", async () => {
+		const repository = testRepository()
+		const pullRequest = {
+			id: "pr-1",
+			number: 1,
+			authorEmail: "author@example.com",
+			title: "Change index",
+			body: "Update code",
+			state: "open" as const,
+			baseRepositoryZipFileId: "repo-zip-1",
+			createdAt: now,
+			updatedAt: now,
+			comments: [],
+		}
+		const cache = createClientPullRequestDiffCache()
+		const proposalZip = await buildClientZipBlob({
+			files: [{ path: "src/index.ts", content: "proposal", size: 8 }],
+		})
+		const firstHarness = workflowHarness(
+			appState({
+				repositories: [repository],
+				repositoryZipFileIds: { [repository.id]: "repo-zip-1" },
+				pullRequests: { [repository.id]: [pullRequest] },
+				pullRequestZipFileIds: { [pullRequest.id]: "pr-zip-1" },
+			}),
+			{
+				[repositoryZipUrl(repository.id)]: await buildClientZipBlob({
+					files: [{ path: "src/index.ts", content: "base one", size: 8 }],
+				}),
+				[pullRequestZipUrl(repository.id, pullRequest.number)]: proposalZip,
+			},
+		)
+		const first = await loadPullRequestDiffSnapshot(
+			firstHarness.context,
+			cache,
+			repository.id,
+			pullRequest.number,
+		)
+
+		const secondHarness = workflowHarness(
+			appState({
+				repositories: [repository],
+				repositoryZipFileIds: { [repository.id]: "repo-zip-2" },
+				pullRequests: { [repository.id]: [pullRequest] },
+				pullRequestZipFileIds: { [pullRequest.id]: "pr-zip-1" },
+			}),
+			{
+				[repositoryZipUrl(repository.id)]: await buildClientZipBlob({
+					files: [{ path: "src/index.ts", content: "base two", size: 8 }],
+				}),
+				[pullRequestZipUrl(repository.id, pullRequest.number)]: proposalZip,
+			},
+		)
+		const second = await loadPullRequestDiffSnapshot(
+			secondHarness.context,
+			cache,
+			repository.id,
+			pullRequest.number,
+		)
+
+		expect(second).not.toBe(first)
+		expect(second.baseZipFileId).toBe("repo-zip-2")
+		expect(second.diff[0]?.before).toMatchObject({ content: "base two" })
+		expect(secondHarness.downloadRepositoryZip).toHaveBeenCalledOnce()
+		expect(secondHarness.downloadPullRequestZip).toHaveBeenCalledOnce()
+	})
+
+	it("downloads the proposal before merge and the old repository after merge", async () => {
+		const repository = testRepository()
+		const pullRequest = {
+			id: "pr-1",
+			number: 1,
+			authorEmail: "author@example.com",
+			title: "Change index",
+			body: "Update code",
+			state: "open" as const,
+			baseRepositoryZipFileId: "repo-zip-1",
+			createdAt: now,
+			updatedAt: now,
+			comments: [],
+		}
+		const proposalZip = await buildClientZipBlob({
+			files: [{ path: "proposal.txt", content: "proposal", size: 8 }],
+		})
+		const baseZip = await buildClientZipBlob({
+			files: [{ path: "base.txt", content: "base", size: 4 }],
+		})
+		const state = appState({
+			repositories: [repository],
+			repositoryZipFileIds: { [repository.id]: "repo-zip-1" },
+			pullRequests: { [repository.id]: [pullRequest] },
+			pullRequestZipFileIds: { [pullRequest.id]: "pr-zip-1" },
+		})
+		const openHarness = workflowHarness(state, {
+			[pullRequestZipUrl(repository.id, pullRequest.number)]: proposalZip,
+		})
+		const openDownload = await downloadPullRequestArchiveZipFile({
+			context: openHarness.context,
+			repositoryId: repository.id,
+			pullRequestNumber: pullRequest.number,
+		})
+		expect(await unzipBlob(openDownload.blob)).toMatchObject([
+			{ path: "proposal.txt" },
+		])
+		expect(openHarness.downloadPullRequestZip).toHaveBeenCalledOnce()
+		expect(openHarness.downloadPullRequestBaseZip).not.toHaveBeenCalled()
+
+		const mergedHarness = workflowHarness(
+			{
+				...state,
+				pullRequests: {
+					[repository.id]: [{ ...pullRequest, state: "merged" as const }],
+				},
+			},
+			{
+				[pullRequestBaseZipUrl(repository.id, pullRequest.number)]: baseZip,
+			},
+		)
+		const mergedDownload = await downloadPullRequestArchiveZipFile({
+			context: mergedHarness.context,
+			repositoryId: repository.id,
+			pullRequestNumber: pullRequest.number,
+		})
+		expect(await unzipBlob(mergedDownload.blob)).toMatchObject([
+			{ path: "base.txt" },
+		])
+		expect(mergedHarness.downloadPullRequestBaseZip).toHaveBeenCalledOnce()
+		expect(mergedHarness.downloadPullRequestZip).not.toHaveBeenCalled()
 	})
 
 	it("merges by authorizing a Drive-side copy of the exact proposal artifact", async () => {
@@ -265,22 +358,17 @@ describe("client ZIP workflows", () => {
 			],
 		})
 		const harness = workflowHarness(state, {
-			[pullRequestZipUrl(repository.id, pullRequest.number)]: prZip,
+			[repositoryZipUrl(repository.id)]: prZip,
 		})
 
 		await mergePullRequestWithProposal({
 			context: harness.context,
-			cache: createClientZipWorkflowCache(),
 			repositoryId: repository.id,
 			pullRequestNumber: pullRequest.number,
 		})
 
-		expect(harness.downloadRepositoryZip).not.toHaveBeenCalled()
-		expect(harness.downloadPullRequestZip).toHaveBeenCalledWith({
-			repositoryId: repository.id,
-			repositoryRootFolderId: repository.rootFolderId,
-			pullRequestNumber: pullRequest.number,
-		})
+		expect(harness.downloadRepositoryZip).toHaveBeenCalledOnce()
+		expect(harness.downloadPullRequestZip).not.toHaveBeenCalled()
 		expect(harness.beginZipUpload).not.toHaveBeenCalled()
 
 		const completeData = harness.mergePullRequest.mock.calls[0]?.[0]
@@ -319,7 +407,6 @@ describe("client ZIP workflows", () => {
 		await expect(
 			mergePullRequestWithProposal({
 				context: harness.context,
-				cache: createClientZipWorkflowCache(),
 				repositoryId: repository.id,
 				pullRequestNumber: pullRequest.number,
 			}),

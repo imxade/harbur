@@ -4,18 +4,12 @@ import { useState } from "react"
 import type { FormEvent } from "react"
 import { isAnonymousEmail } from "../../lib/auth"
 import { saveDownloadFile, type DownloadFile } from "../../lib/download-client"
-import type { ClientPullRequestDiffSnapshot } from "../../lib/client-zip-cache"
+import type { ClientPullRequestDiffSnapshot } from "../../lib/client-diff-cache"
 import type { PullRequestState } from "../../lib/pulls"
 import { displayOwnerName } from "../../lib/users"
 import { FileDiffView } from "./FileDiffView"
 import { UploadProgressStatus } from "./LoadingStates"
 import { ChatTimeline, EditableThreadTitle } from "./ThreadComponents"
-
-type RepositoryContentFile = {
-	path: string
-	content: string | Uint8Array
-	encoding?: "utf8" | "base64"
-}
 
 type PullRequestComment = {
 	id: string
@@ -93,7 +87,7 @@ type PullsPanelProps = {
 	}) => Promise<void>
 	onReview: (repositoryId: string, pullRequestNumber: number) => Promise<void>
 	onClose: (repositoryId: string, pullRequestNumber: number) => Promise<void>
-	onDownloadMerged: (
+	onDownloadArchive: (
 		repositoryId: string,
 		pullRequestNumber: number,
 	) => Promise<DownloadFile>
@@ -121,7 +115,7 @@ export function PullsPanel({
 	onEditTitle,
 	onReview,
 	onClose,
-	onDownloadMerged,
+	onDownloadArchive,
 	onMerge,
 	onSignIn,
 	uploadProgress,
@@ -242,16 +236,16 @@ export function PullsPanel({
 			setCommentBusy(false)
 		}
 	}
-	async function downloadMergedZip() {
+	async function downloadArchiveZip() {
 		if (!selected) return
 		setDownloadBusy(true)
 		setError(null)
 		try {
-			const download = await onDownloadMerged(repositoryId, selected.number)
+			const download = await onDownloadArchive(repositoryId, selected.number)
 			saveDownloadFile(download)
 		} catch (cause) {
 			setError(
-				cause instanceof Error ? cause.message : "Merged ZIP download failed.",
+				cause instanceof Error ? cause.message : "PR ZIP download failed.",
 			)
 			setDownloadBusy(false)
 		} finally {
@@ -304,6 +298,8 @@ export function PullsPanel({
 			},
 			...selected.comments,
 		]
+		const archiveLabel =
+			selected.state === "merged" ? "Pre-merge ZIP" : "Proposal ZIP"
 		return (
 			<section className="min-w-0">
 				<article className="min-w-0 space-y-4">
@@ -390,13 +386,17 @@ export function PullsPanel({
 										type="button"
 										className="btn btn-outline btn-sm"
 										disabled={
-											downloadBusy || actionBusy || selected.state !== "open"
+											downloadBusy || actionBusy || selected.state === "closed"
 										}
-										title="Download merged ZIP for testing"
-										onClick={() => void downloadMergedZip()}
+										title={
+											selected.state === "merged"
+												? "Download the repository ZIP from immediately before this merge"
+												: "Download the complete proposed repository ZIP for testing"
+										}
+										onClick={() => void downloadArchiveZip()}
 									>
 										<Download size={16} />
-										{downloadBusy ? "Building ZIP" : "Merged ZIP"}
+										{downloadBusy ? "Starting" : archiveLabel}
 									</button>
 									<button
 										type="button"
@@ -461,14 +461,8 @@ export function PullsPanel({
 									<FileDiffView
 										key={`${fileDiff.path}:${fileDiff.status}`}
 										diff={fileDiff}
-										before={findFileContent(
-											selectedDiff.baseFiles,
-											fileDiff.path,
-										)}
-										after={findFileContent(
-											selectedDiff.proposalFiles,
-											fileDiff.path,
-										)}
+										before={fileDiff.before}
+										after={fileDiff.after}
 									/>
 								))}
 								{!selectedDiff ? (
@@ -632,8 +626,4 @@ function PullRequestForm({
 			</div>
 		</form>
 	)
-}
-
-function findFileContent(files: RepositoryContentFile[], path: string) {
-	return files.find((file) => file.path === path)
 }
