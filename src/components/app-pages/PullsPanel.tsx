@@ -9,7 +9,11 @@ import type { PullRequestState } from "../../lib/pulls"
 import { displayOwnerName } from "../../lib/users"
 import { FileDiffView } from "./FileDiffView"
 import { UploadProgressStatus } from "./LoadingStates"
-import { ChatTimeline, EditableThreadTitle } from "./ThreadComponents"
+import {
+	ChatTimeline,
+	EditableThreadTitle,
+	type ChatTimelineMessage,
+} from "./ThreadComponents"
 
 type PullRequestComment = {
 	id: string
@@ -40,6 +44,8 @@ type PendingPullRequestCreation = {
 	status: "creating" | "failed"
 	error?: string
 }
+
+type PendingComment = ChatTimelineMessage & { pullRequestNumber: number }
 
 type UploadProgressView = {
 	phase: "preparing" | "zipping" | "uploading"
@@ -73,7 +79,7 @@ type PullsPanelProps = {
 		repositoryId: string
 		pullRequestNumber: number
 		body: string
-	}) => Promise<void>
+	}) => Promise<ChatTimelineMessage>
 	onEditMessage: (input: {
 		repositoryId: string
 		pullRequestNumber: number
@@ -124,7 +130,7 @@ export function PullsPanel({
 	const [body, setBody] = useState("")
 	const [files, setFiles] = useState<File[]>([])
 	const [comment, setComment] = useState("")
-	const [commentBusy, setCommentBusy] = useState(false)
+	const [pendingComments, setPendingComments] = useState<PendingComment[]>([])
 	const [actionBusy, setActionBusy] = useState(false)
 	const [downloadBusy, setDownloadBusy] = useState(false)
 	const [fileInputKey, setFileInputKey] = useState(0)
@@ -221,19 +227,50 @@ export function PullsPanel({
 			return
 		}
 		if (!selected) return
-		setCommentBusy(true)
+		const body = comment.trim()
+		if (!body) return
+		const pendingId = `pending:${crypto.randomUUID()}`
+		const pullRequestNumber = selected.number
+		setPendingComments((current) => [
+			...current,
+			{
+				id: pendingId,
+				pullRequestNumber,
+				authorEmail: actorEmail,
+				body,
+				createdAt: new Date().toISOString(),
+				persistenceStatus: "sending",
+			},
+		])
+		setComment("")
 		setError(null)
 		try {
-			await onComment({
+			const stored = await onComment({
 				repositoryId,
-				pullRequestNumber: selected.number,
-				body: comment,
+				pullRequestNumber,
+				body,
 			})
-			setComment("")
+			setPendingComments((current) =>
+				current.map((item) =>
+					item.id === pendingId
+						? { ...stored, pullRequestNumber, persistenceStatus: "stored" }
+						: item,
+				),
+			)
+			window.setTimeout(() => {
+				setPendingComments((current) =>
+					current.filter((item) => item.id !== stored.id),
+				)
+			}, 1800)
 		} catch (cause) {
+			setPendingComments((current) =>
+				current.map((item) =>
+					item.id === pendingId
+						? { ...item, persistenceStatus: "failed" }
+						: item,
+				),
+			)
 			setError(cause instanceof Error ? cause.message : "Comment failed.")
-		} finally {
-			setCommentBusy(false)
 		}
 	}
 	async function downloadArchiveZip() {
@@ -287,7 +324,7 @@ export function PullsPanel({
 	}
 
 	if (selected) {
-		const timeline = [
+		const timeline = mergeTimelineMessages([
 			{
 				id: selected.id,
 				authorEmail: selected.authorEmail,
@@ -297,7 +334,10 @@ export function PullsPanel({
 				editedAt: selected.editedAt,
 			},
 			...selected.comments,
-		]
+			...pendingComments.filter(
+				(pending) => pending.pullRequestNumber === selected.number,
+			),
+		])
 		const archiveLabel =
 			selected.state === "merged" ? "Pre-merge ZIP" : "Proposal ZIP"
 		return (
@@ -353,9 +393,8 @@ export function PullsPanel({
 								<button
 									type="submit"
 									className="btn btn-primary btn-sm w-full sm:w-auto"
-									disabled={commentBusy}
 								>
-									{commentBusy ? "Commenting" : "Comment"}
+									Comment
 								</button>
 							</form>
 						</div>
@@ -521,6 +560,15 @@ export function PullsPanel({
 			</div>
 			{pullRequestForm}
 		</section>
+	)
+}
+
+function mergeTimelineMessages(messages: ChatTimelineMessage[]) {
+	const byId = new Map(messages.map((message) => [message.id, message]))
+	return [...byId.values()].sort(
+		(left, right) =>
+			left.createdAt.localeCompare(right.createdAt) ||
+			left.id.localeCompare(right.id),
 	)
 }
 

@@ -69,6 +69,15 @@ import {
 } from "../lib/server-functions"
 import type { Actor, AppSettings, RepositoryPolicy } from "../lib/types"
 
+type StoredThreadComment = {
+	id: string
+	authorEmail: string
+	body: string
+	createdAt: string
+	updatedAt?: string
+	editedAt?: string
+}
+
 function hasDueGitHubMirrorSync(state: AppState) {
 	const intervalHours = state.settings.githubMirrorSyncIntervalHours
 	if (intervalHours <= 0) return false
@@ -144,7 +153,7 @@ type AppShellState = {
 		repositoryId: string
 		issueNumber: number
 		body: string
-	}) => Promise<void>
+	}) => Promise<StoredThreadComment>
 	editIssueMessage: (input: {
 		repositoryId: string
 		issueNumber: number
@@ -171,7 +180,7 @@ type AppShellState = {
 		repositoryId: string
 		pullRequestNumber: number
 		body: string
-	}) => Promise<void>
+	}) => Promise<StoredThreadComment>
 	editPullRequestMessage: (input: {
 		repositoryId: string
 		pullRequestNumber: number
@@ -931,8 +940,27 @@ export default function AppShellProvider({
 		issueNumber: number
 		body: string
 	}) {
-		requireReadySession()
-		applyDriveState(await commentOnIssueFn({ data: withRepositoryRoot(input) }))
+		const { currentUser } = requireReadySession()
+		const previousIds = new Set(
+			driveStateRef.current?.issues[input.repositoryId]
+				?.find((issue) => issue.number === input.issueNumber)
+				?.comments.map((comment) => comment.id) ?? [],
+		)
+		const nextState = await commentOnIssueFn({
+			data: withRepositoryRoot(input),
+		})
+		applyDriveState(nextState)
+		const stored = nextState.issues[input.repositoryId]
+			?.find((issue) => issue.number === input.issueNumber)
+			?.comments.find(
+				(comment) =>
+					!previousIds.has(comment.id) &&
+					comment.authorEmail.toLowerCase() ===
+						currentUser.email.toLowerCase() &&
+					comment.body === input.body.trim(),
+			)
+		if (!stored) throw new Error("Stored issue comment was not returned.")
+		return stored
 	}
 
 	async function editIssueMessage(input: {
@@ -997,10 +1025,28 @@ export default function AppShellProvider({
 		pullRequestNumber: number
 		body: string
 	}) {
-		requireReadySession()
-		applyDriveState(
-			await commentOnPullRequestFn({ data: withRepositoryRoot(input) }),
+		const { currentUser } = requireReadySession()
+		const previousIds = new Set(
+			driveStateRef.current?.pullRequests[input.repositoryId]
+				?.find((pullRequest) => pullRequest.number === input.pullRequestNumber)
+				?.comments.map((comment) => comment.id) ?? [],
 		)
+		const nextState = await commentOnPullRequestFn({
+			data: withRepositoryRoot(input),
+		})
+		applyDriveState(nextState)
+		const stored = nextState.pullRequests[input.repositoryId]
+			?.find((pullRequest) => pullRequest.number === input.pullRequestNumber)
+			?.comments.find(
+				(comment) =>
+					!previousIds.has(comment.id) &&
+					comment.authorEmail.toLowerCase() ===
+						currentUser.email.toLowerCase() &&
+					comment.body === input.body.trim(),
+			)
+		if (!stored)
+			throw new Error("Stored pull request comment was not returned.")
+		return stored
 	}
 
 	async function editPullRequestMessage(input: {
