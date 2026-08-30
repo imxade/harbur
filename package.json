@@ -56,7 +56,7 @@
 		"nitro": "npm:nitro-nightly@^3.0.1-20260505-131157-aee73f19",
 		"typescript": "^7.0.2",
 		"vite": "^8.2.1",
-		"vitest": "^4.1.5"
+		"vitest": "^4.1.11"
 	},
 	"overrides": {
 		"nanoid": "^3.3.18"
